@@ -1,0 +1,225 @@
+{
+  "metadata": {
+    "generated_at": "2026-04-09T12:40:32.672681",
+    "generator": "AutoCrew Meta Agent",
+    "task_description": "Predict credit approval (Binary Classification).",
+    "dataset": "data/credit_card_approval.csv",
+    "llm_provider": "groq"
+  },
+  "modeling_crew": {
+    "process": "sequential",
+    "agents": [
+      {
+        "id": "agent_0",
+        "role": "Data Analyst",
+        "goal": "Load and validate the dataset",
+        "backstory": "You ensure data quality before any modeling begins.",
+        "tools": [
+          "code_execution"
+        ],
+        "allow_delegation": false
+      },
+      {
+        "id": "agent_1",
+        "role": "Data Scientist",
+        "goal": "Perform exploratory data analysis on the loaded dataset",
+        "backstory": "You uncover insights from the data to inform modeling decisions.",
+        "tools": [
+          "eda_tool"
+        ],
+        "allow_delegation": false
+      },
+      {
+        "id": "agent_2",
+        "role": "Senior Data Scientist",
+        "goal": "Extract relevant features from the dataset for credit approval prediction",
+        "backstory": "You engineer features that capture the essence of the data for accurate predictions.",
+        "tools": [
+          "code_execution"
+        ],
+        "allow_delegation": false
+      },
+      {
+        "id": "agent_3",
+        "role": "ML Engineer",
+        "goal": "Select suitable binary classification model for credit approval prediction",
+        "backstory": "You choose the best model for the task at hand, balancing performance and complexity.",
+        "tools": [],
+        "allow_delegation": false
+      },
+      {
+        "id": "agent_4",
+        "role": "ML Engineer",
+        "goal": "Tune hyperparameters of the selected model for optimal performance",
+        "backstory": "You fine-tune the model's parameters to squeeze out the best possible results.",
+        "tools": [
+          "code_execution"
+        ],
+        "allow_delegation": false
+      },
+      {
+        "id": "agent_5",
+        "role": "ML Engineer",
+        "goal": "Train the model with the tuned hyperparameters on the dataset",
+        "backstory": "You train the model to learn from the data and make accurate predictions.",
+        "tools": [
+          "code_execution"
+        ],
+        "allow_delegation": false
+      },
+      {
+        "id": "agent_6",
+        "role": "Senior ML Engineer",
+        "goal": "Evaluate the performance of the trained model on the dataset",
+        "backstory": "You assess the model's strengths and weaknesses to inform future improvements.",
+        "tools": [
+          "code_execution"
+        ],
+        "allow_delegation": false
+      },
+      {
+        "id": "agent_7",
+        "role": "Technical Writer",
+        "goal": "Document the trained model for reproducibility and compliance",
+        "backstory": "You create clear and concise documentation to facilitate model reuse and auditing.",
+        "tools": [
+          "cag_tool"
+        ],
+        "allow_delegation": false
+      }
+    ],
+    "tasks": [
+      {
+        "description": "Write and execute Python code to load 'data/credit_card_approval.csv' into a Pandas DataFrame, print the DataFrame's shape and column types. Use the following code: \nimport pandas as pd\n# Load the dataset\ncredit_data = pd.read_csv('data/credit_card_approval.csv')\n# Print the DataFrame's shape and column types\nprint(credit_data.shape)\nprint(credit_data.dtypes)",
+        "expected_output": "Data summary with shape and column types.",
+        "agent_id": "agent_0",
+        "context_from_indices": []
+      },
+      {
+        "description": "Use the 'eda_tool' to perform exploratory data analysis on the loaded dataset. Look for correlations between features, missing values, and data distributions. Format your findings as a table with the following columns: Feature, Type, Missing Values, Correlation with Target.",
+        "expected_output": "A table summarizing the exploratory data analysis findings.",
+        "agent_id": "agent_1",
+        "context_from_indices": [
+          0
+        ]
+      },
+      {
+        "description": "Write and execute Python code to extract relevant features from the dataset for credit approval prediction. Use the following code: \nimport pandas as pd\nfrom sklearn.preprocessing import StandardScaler\n# Load the dataset\ncredit_data = pd.read_csv('data/credit_card_approval.csv')\n# Select relevant features\nrelevant_features = credit_data[['feature1', 'feature2', 'feature3']] \n# Scale the features using StandardScaler\nscaler = StandardScaler()\nrelevant_features_scaled = scaler.fit_transform(relevant_features)\n# Print the scaled features\nprint(relevant_features_scaled)",
+        "expected_output": "Scaled features for credit approval prediction.",
+        "agent_id": "agent_2",
+        "context_from_indices": [
+          1
+        ]
+      },
+      {
+        "description": "Select a suitable binary classification model for credit approval prediction. Consider the dataset's characteristics and the problem's requirements. Choose a model that balances accuracy and interpretability.",
+        "expected_output": "A recommended binary classification model for credit approval prediction.",
+        "agent_id": "agent_3",
+        "context_from_indices": [
+          2
+        ]
+      },
+      {
+        "description": "Write and execute Python code to tune the hyperparameters of the selected model using a grid search. Use the following code: \nfrom sklearn.model_selection import GridSearchCV\n# Load the dataset\ncredit_data = pd.read_csv('data/credit_card_approval.csv')\n# Select the model and hyperparameters to tune\nmodel = 'model_name'\nhp_space = {'param1': [value1, value2], 'param2': [value3, value4]}\n# Perform grid search\ngrid_search = GridSearchCV(model, hp_space, cv=5, scoring='f1_macro')\ngrid_search.fit(credit_data.drop('target', axis=1), credit_data['target'])\n# Print the best hyperparameters and the corresponding score\nprint(grid_search.best_params_) \nprint(grid_search.best_score_)",
+        "expected_output": "The best hyperparameters and the corresponding F1 score.",
+        "agent_id": "agent_4",
+        "context_from_indices": [
+          3
+        ]
+      },
+      {
+        "description": "Write and execute Python code to train the model with the tuned hyperparameters on the dataset. Use the following code: \nfrom sklearn.model_selection import train_test_split\n# Load the dataset\ncredit_data = pd.read_csv('data/credit_card_approval.csv')\n# Split the data into training and testing sets\nX_train, X_test, y_train, y_test = train_test_split(credit_data.drop('target', axis=1), credit_data['target'], test_size=0.2, random_state=42)\n# Train the model\nmodel = 'model_name'\nmodel.fit(X_train, y_train)\n# Print the model's accuracy on the training set\nprint(model.score(X_train, y_train))",
+        "expected_output": "The model's accuracy on the training set.",
+        "agent_id": "agent_5",
+        "context_from_indices": [
+          4
+        ]
+      },
+      {
+        "description": "Write and execute Python code to evaluate the performance of the trained model on the dataset. Use the following code: \nfrom sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score\n# Load the dataset\ncredit_data = pd.read_csv('data/credit_card_approval.csv')\n# Split the data into training and testing sets\nX_train, X_test, y_train, y_test = train_test_split(credit_data.drop('target', axis=1), credit_data['target'], test_size=0.2, random_state=42)\n# Train the model\nmodel = 'model_name'\nmodel.fit(X_train, y_train)\n# Make predictions on the testing set\ny_pred = model.predict(X_test)\n# Print the model's performance metrics\nprint('Accuracy:', accuracy_score(y_test, y_pred))\nprint('F1 Score:', f1_score(y_test, y_pred))\nprint('Precision:', precision_score(y_test, y_pred))\nprint('Recall:', recall_score(y_test, y_pred))",
+        "expected_output": "The model's performance metrics, including accuracy, F1 score, precision, and recall.",
+        "agent_id": "agent_6",
+        "context_from_indices": [
+          5
+        ]
+      },
+      {
+        "description": "Write a document that includes the following sections: Introduction, Methodology, Results, Discussion, and Conclusion. In the Results section, include the model's performance metrics and a table summarizing the exploratory data analysis findings.",
+        "expected_output": "A document that includes the model's performance metrics and exploratory data analysis findings.",
+        "agent_id": "agent_7",
+        "context_from_indices": [
+          6
+        ]
+      }
+    ]
+  },
+  "mrm_crew": {
+    "process": "sequential",
+    "agents": [
+      {
+        "id": "mrm_agent_0",
+        "role": "Senior ML Engineer",
+        "goal": "Replicate the trained model to ensure reproducibility",
+        "backstory": "You verify that the model can be reliably reproduced to maintain trust in its results.",
+        "tools": [
+          "code_execution"
+        ],
+        "allow_delegation": false
+      },
+      {
+        "id": "mrm_agent_1",
+        "role": "Model Validation Analyst",
+        "goal": "Verify the conceptual soundness of the model and its features",
+        "backstory": "You ensure that the model is based on sound principles and is free from logical flaws.",
+        "tools": [],
+        "allow_delegation": false
+      },
+      {
+        "id": "mrm_agent_2",
+        "role": "Stress Testing Engineer",
+        "goal": "Perform stress testing on the model to evaluate its robustness",
+        "backstory": "You push the model to its limits to assess its ability to handle extreme scenarios.",
+        "tools": [],
+        "allow_delegation": false
+      },
+      {
+        "id": "mrm_agent_3",
+        "role": "Chief Risk Officer",
+        "goal": "Provide a final verdict on the model's suitability for credit approval prediction",
+        "backstory": "You make the ultimate decision on whether the model is ready for deployment and use in high-stakes applications.",
+        "tools": [],
+        "allow_delegation": false
+      }
+    ],
+    "tasks": [
+      {
+        "description": "Write and execute Python code to replicate the trained model. Use the following code: \nimport pickle\n# Load the trained model\nwith open('model.pkl', 'rb') as f:\n    model = pickle.load(f)\n# Make predictions on a new dataset\nnew_data = pd.read_csv('new_data.csv')\npredictions = model.predict(new_data)\n# Print the predictions\nprint(predictions)",
+        "expected_output": "The model's predictions on the new dataset.",
+        "agent_id": "mrm_agent_0",
+        "context_from_indices": []
+      },
+      {
+        "description": "Verify the conceptual soundness of the model and its features. Consider the problem's requirements and the dataset's characteristics. Check for any biases or inconsistencies in the model's design.",
+        "expected_output": "A report on the model's conceptual soundness and any identified biases or inconsistencies.",
+        "agent_id": "mrm_agent_1",
+        "context_from_indices": []
+      },
+      {
+        "description": "Perform stress testing on the model to evaluate its robustness. Use a variety of scenarios and data sets to test the model's performance under different conditions.",
+        "expected_output": "A report on the model's performance under stress testing.",
+        "agent_id": "mrm_agent_2",
+        "context_from_indices": []
+      },
+      {
+        "description": "Provide a final verdict on the model's suitability for credit approval prediction. Consider the model's performance metrics, conceptual soundness, and robustness.",
+        "expected_output": "A final verdict on the model's suitability for credit approval prediction.",
+        "agent_id": "mrm_agent_3",
+        "context_from_indices": [
+          0,
+          1,
+          2
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,140 @@
+{
+  "metadata": {
+    "generated_at": "2026-04-09T12:57:16.712605",
+    "generator": "AutoCrew Meta Agent",
+    "task_description": "Predict credit approval (Binary Classification).",
+    "dataset": "data/credit_card_approval.csv",
+    "llm_provider": "groq"
+  },
+  "modeling_crew": {
+    "process": "sequential",
+    "agents": [
+      {
+        "id": "agent_0",
+        "role": "Data Analyst",
+        "goal": "Load the credit card approval dataset",
+        "backstory": "You ensure data quality before any modeling begins, starting with loading the dataset from data/credit_card_approval.csv.",
+        "tools": [
+          "code_execution"
+        ],
+        "allow_delegation": false
+      },
+      {
+        "id": "agent_1",
+        "role": "Data Scientist",
+        "goal": "Perform exploratory data analysis to understand variable distributions and identify correlations",
+        "backstory": "You need to understand the data to identify potential issues and opportunities for improvement, using EDA to guide your analysis.",
+        "tools": [
+          "eda_tool",
+          "code_execution"
+        ],
+        "allow_delegation": false
+      },
+      {
+        "id": "agent_2",
+        "role": "Senior Data Scientist",
+        "goal": "Transform and engineer features to improve model performance",
+        "backstory": "With a solid understanding of the data, you now focus on transforming and engineering features to enhance the model's ability to make accurate predictions.",
+        "tools": [
+          "code_execution"
+        ],
+        "allow_delegation": false
+      },
+      {
+        "id": "agent_3",
+        "role": "ML Engineer",
+        "goal": "Select a suitable binary classification algorithm and perform hyperparameter tuning",
+        "backstory": "You are responsible for selecting the most appropriate model for the task and optimizing its performance through hyperparameter tuning.",
+        "tools": [
+          "code_execution"
+        ],
+        "allow_delegation": false
+      }
+    ],
+    "tasks": [
+      {
+        "description": "Write and execute Python code to load 'data/credit_card_approval.csv' using pandas library. Use the read_csv function to load the data and print the first 5 rows of the dataset. The code should include necessary error handling and data type checks. Output the data shape and column types in the format: 'Data shape: (rows, columns), Column types: column1:type, column2:type,...'",
+        "expected_output": "Data summary with shape and column types, e.g., 'Data shape: (1000, 10), Column types: column1:int, column2:float,...'",
+        "agent_id": "agent_0",
+        "context_from_indices": []
+      },
+      {
+        "description": "Perform exploratory data analysis on the loaded dataset 'data/credit_card_approval.csv' to understand the distribution of variables and identify potential correlations. Use matplotlib and seaborn libraries to visualize histograms, box plots, and scatter plots. Calculate and print summary statistics such as mean, median, mode, and standard deviation for each column. Look for correlations between columns and print the correlation matrix. Output findings in the format: 'Variable distribution: [histogram/box plot], Correlation between column1 and column2: value'",
+        "expected_output": "Summary statistics and visualizations of variable distributions and correlations, e.g., 'Variable distribution: histogram, Correlation between column1 and column2: 0.8'",
+        "agent_id": "agent_1",
+        "context_from_indices": [
+          0
+        ]
+      },
+      {
+        "description": "Transform and engineer features to improve model performance on the loaded dataset 'data/credit_card_approval.csv'. Use pandas and numpy libraries to handle missing values, encode categorical variables, and scale/normalize numerical variables. Print the transformed dataset and output the feature importance in the format: 'Feature importance: feature1:importance, feature2:importance,...'",
+        "expected_output": "Transformed dataset and feature importance, e.g., 'Feature importance: feature1:0.8, feature2:0.2'",
+        "agent_id": "agent_2",
+        "context_from_indices": [
+          1
+        ]
+      },
+      {
+        "description": "Select a suitable binary classification algorithm and perform hyperparameter tuning on the transformed dataset 'data/credit_card_approval.csv'. Use scikit-learn library to train and evaluate models such as Logistic Regression, Decision Trees, and Random Forest. Print the model performance metrics such as Accuracy, F1 Score, Precision, and Recall. Output the best model and its hyperparameters in the format: 'Best model: model_name, Hyperparameters: param1:value, param2:value,...'",
+        "expected_output": "Model performance metrics and best model with hyperparameters, e.g., 'Best model: Random Forest, Hyperparameters: n_estimators:100, max_depth:5'",
+        "agent_id": "agent_3",
+        "context_from_indices": [
+          2
+        ]
+      }
+    ]
+  },
+  "mrm_crew": {
+    "process": "sequential",
+    "agents": [
+      {
+        "id": "mrm_agent_0",
+        "role": "Compliance Officer",
+        "goal": "Verify that the model documentation meets regulatory requirements",
+        "backstory": "You ensure that all model documentation is compliant with regulatory standards, protecting the organization from potential risks.",
+        "tools": [
+          "cag_tool"
+        ],
+        "allow_delegation": false
+      },
+      {
+        "id": "mrm_agent_1",
+        "role": "Stress Testing Engineer",
+        "goal": "Replicate the model on a separate dataset to validate its performance under different conditions",
+        "backstory": "Your task is to test the model's robustness by replicating it on a separate dataset, assessing how it performs under various stress scenarios.",
+        "tools": [
+          "code_execution"
+        ],
+        "allow_delegation": false
+      },
+      {
+        "id": "mrm_agent_2",
+        "role": "Model Validation Analyst",
+        "goal": "Assess the conceptual soundness of the model, including feature importance and selection",
+        "backstory": "You evaluate the model's conceptual soundness, focusing on how well the features contribute to its predictions and whether the model is interpretable.",
+        "tools": [],
+        "allow_delegation": false
+      }
+    ],
+    "tasks": [
+      {
+        "description": "Verify that the model documentation meets regulatory requirements by checking for sections such as Data Description, Model Architecture, Training Procedure, and Evaluation Metrics. Use the cag_tool to check for compliance and output the compliance report in the format: 'Compliance report: section1:status, section2:status,...'",
+        "expected_output": "Compliance report indicating whether each section meets regulatory requirements, e.g., 'Compliance report: Data Description:pass, Model Architecture:fail'",
+        "agent_id": "mrm_agent_0",
+        "context_from_indices": []
+      },
+      {
+        "description": "Replicate the model on a separate dataset to validate its performance. Load the separate dataset 'data/credit_card_approval_validation.csv' and use the same model and hyperparameters as the original model. Print the model performance metrics such as Accuracy, F1 Score, Precision, and Recall on the validation dataset. Output the replication results in the format: 'Replication results: metric1:value, metric2:value,...'",
+        "expected_output": "Replication results with model performance metrics on the validation dataset, e.g., 'Replication results: Accuracy:0.9, F1 Score:0.8'",
+        "agent_id": "mrm_agent_1",
+        "context_from_indices": []
+      },
+      {
+        "description": "Assess the conceptual soundness of the model, including feature importance and selection. Review the feature engineering process and model architecture to ensure they align with the problem statement and data characteristics. Output the assessment report in the format: 'Conceptual soundness report: feature_importance:assessment, model_architecture:assessment,...'",
+        "expected_output": "Conceptual soundness report indicating the assessment of feature importance and model architecture, e.g., 'Conceptual soundness report: feature_importance:pass, model_architecture:pass'",
+        "agent_id": "mrm_agent_2",
+        "context_from_indices": []
+      }
+    ]
+  }
+}
