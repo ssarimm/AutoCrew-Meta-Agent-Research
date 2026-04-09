@@ -1,0 +1,14 @@
+.env
+__pycache__/
+*.pyc
+venv/
+.venv/
+temp_script.py
+configs/generated/*.json
+results/
+*.pkl
+*.joblib
+
+# Ignore all files in data, but keep the folder
+data/*
+!data/.gitkeep

@@ -1,0 +1,25 @@
+{
+  "tools": [
+    {
+      "name": "code_execution",
+      "class_name": "CodeExecutionTool",
+      "module": "src.tools.code_execution",
+      "description": "Executes Python scripts. Use for data loading, model training, evaluation, preprocessing, and any task that requires running code.",
+      "use_cases": ["data loading", "model training", "evaluation", "preprocessing", "stress testing", "feature engineering"]
+    },
+    {
+      "name": "eda_tool",
+      "class_name": "EDATool",
+      "module": "src.tools.eda_tool",
+      "description": "Performs automated exploratory data analysis on CSV files. Returns shape, types, missing values, class balance, correlations, and statistics.",
+      "use_cases": ["exploratory data analysis", "data profiling", "data summary"]
+    },
+    {
+      "name": "cag_tool",
+      "class_name": "CAGTool",
+      "module": "src.tools.cag_tool",
+      "description": "Cache-Augmented Generation tool for checking documentation compliance against organizational modeling guidelines.",
+      "use_cases": ["compliance checking", "documentation review", "procedure verification"]
+    }
+  ]
+}
