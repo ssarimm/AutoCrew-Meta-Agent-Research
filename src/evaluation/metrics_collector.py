@@ -92,3 +92,14 @@ class MetricsCollector:
                     continue
 
         return -1.0
+    
+    def get_all_records(self) -> list:
+        return self.records
+
+    def save_records(self, filepath: str = "results/metrics.json"):
+        """Save all collected metrics to JSON."""
+        import os
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        with open(filepath, "w") as f:
+            json.dump(self.records, f, indent=2)
+        print(f"Metrics saved to {filepath}")
