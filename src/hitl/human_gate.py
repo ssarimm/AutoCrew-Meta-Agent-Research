@@ -1,34 +1,60 @@
 import sys
-
+import sys
+import time
 
 def human_gate(modeling_output, phase="MRM Audit"):
     """
     Human-in-the-loop intervention point.
-    Shows modeling output and asks whether to proceed.
+    Shows a clean summary and asks whether to proceed.
     Used by BOTH manual and auto paths.
     
     Returns:
         True if human approves, False otherwise.
     """
-    print("\n" + "=" * 50)
-    print(f"HUMAN INTERVENTION ({phase})")
-    print("=" * 50)
-
-    print("\nModeling Output Summary:")
-    # Show truncated output if too long
     output_str = str(modeling_output)
-    if len(output_str) > 2000:
-        print(output_str[:2000] + "\n... [truncated]")
-    else:
-        print(output_str)
 
-    print("\n" + "-" * 50)
-    proceed = input(f"Proceed to {phase}? (y/n): ").strip().lower()
+    # Extract key metrics if present
+    import re
+    metrics_found = []
+    for metric in ["accuracy", "f1 score", "precision", "recall"]:
+        match = re.search(rf"{metric}\s*[:=]\s*([\d.]+)", output_str.lower())
+        if match:
+            metrics_found.append(f"  {metric.title()}: {match.group(1)}")
+
+    print("\n")
+    print("=" * 55)
+    print(f"  HUMAN REVIEW REQUIRED — {phase}")
+    print("=" * 55)
+
+    if metrics_found:
+        print("\n  Metrics extracted from modeling output:")
+        for m in metrics_found:
+            print(m)
+    else:
+        print("\n  (No metrics could be extracted automatically)")
+        print(f"  Output length: {len(output_str)} characters")
+
+    print("\n" + "-" * 55)
+    print(f"  Type 'y' to proceed to {phase}")
+    print(f"  Type 'n' to stop the pipeline")
+    print("-" * 55)
+
+    
+    sys.stdout.flush()
+    sys.stderr.flush()
+    time.sleep(2)
+
+    while True:
+        proceed = input("\n  >>> Your choice (y/n): ").strip().lower()
+        if proceed in ["y", "n"]:
+            break
+        print("  Please enter 'y' or 'n'.")
 
     if proceed != "y":
-        print("Human chose to stop. Exiting.")
+        print("\n  Pipeline stopped by user.\n")
         return False
 
+    print(f"\n  Proceeding to {phase}...\n")
     return True
 
 

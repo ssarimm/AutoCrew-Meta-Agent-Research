@@ -72,30 +72,23 @@ class MetricsCollector:
             rf"{metric_name}\s*[:=]\s*([\d.]+)",
             rf"{metric_name}\s*score\s*[:=]\s*([\d.]+)",
             rf"{metric_name}\s*\(.*?\)\s*[:=]\s*([\d.]+)",
+            rf"{metric_name}\s*.*?:\s*([\d.]+)",
+            rf"'{metric_name}'.*?:\s*([\d.]+)",
+            rf"{metric_name}.*?(0\.\d+)",
+            rf"{metric_name}.*?(\d+\.\d+)%",
         ]
 
         text_lower = text.lower()
         for pattern in patterns:
-            match = re.search(pattern, text_lower)
-            if match:
+            matches = re.findall(pattern, text_lower)
+            if matches:
                 try:
-                    val = float(match.group(1))
-                    # If value > 1, it's likely a percentage
+                    val = float(matches[-1])  # take last match (usually the final/best result)
                     if val > 1:
                         val = val / 100.0
-                    return round(val, 4)
+                    if 0 < val <= 1:
+                        return round(val, 4)
                 except ValueError:
                     continue
 
-        return -1.0  # Not found
-
-    def get_all_records(self) -> list:
-        return self.records
-
-    def save_records(self, filepath: str = "results/metrics.json"):
-        """Save all collected metrics to JSON."""
-        import os
-        os.makedirs(os.path.dirname(filepath), exist_ok=True)
-        with open(filepath, "w") as f:
-            json.dump(self.records, f, indent=2)
-        print(f"Metrics saved to {filepath}")
+        return -1.0

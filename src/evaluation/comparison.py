@@ -118,4 +118,12 @@ class ComparisonRunner:
         print(report)
         print("=" * 60)
 
+        # Regenerate charts with correct dataset
+        try:
+            from src.evaluation.generate_charts import generate_all
+            ds = results.get("manual", {}).get("dataset", results.get("auto", {}).get("dataset", ""))
+            generate_all(dataset_name=ds)
+        except Exception as e:
+            print(f"[Comparison] Chart regeneration failed: {e}")
+            
         self.collector.save_records()

@@ -33,6 +33,7 @@ def run_auto_pipeline(llm, dataset_path, task_desc, llm_provider_name="ollama"):
     config_files = sorted([f for f in os.listdir(config_dir) if f.endswith(".json")]) if os.path.exists(config_dir) else []
     config_path = os.path.join(config_dir, config_files[-1]) if config_files else None
     results["config_path"] = config_path
+    results["generated_config"] = config
 
     print("\nWaiting 60s for API rate limit to reset...")
     time.sleep(60)
@@ -65,7 +66,12 @@ def run_auto_pipeline(llm, dataset_path, task_desc, llm_provider_name="ollama"):
 
     if not human_gate(modeling_output, phase="MRM Audit"):
         results["mrm_verdict"] = "SKIPPED_BY_HUMAN"
+        results["mrm_time_sec"] = 0
+        results["total_time_sec"] = round(
+            results.get("meta_agent_time_sec", 0) + results.get("modeling_time_sec", 0), 2
+        )
         _generate_report(results, config_path)
+        _save_results_json(results)
         return results
 
     print("\nWaiting 60s for API rate limit to reset...")
@@ -74,7 +80,12 @@ def run_auto_pipeline(llm, dataset_path, task_desc, llm_provider_name="ollama"):
     if mrm_crew is None:
         print("WARNING: No MRM crew was generated.")
         results["mrm_verdict"] = "NO_MRM_CREW"
+        results["mrm_time_sec"] = 0
+        results["total_time_sec"] = round(
+            results.get("meta_agent_time_sec", 0) + results.get("modeling_time_sec", 0), 2
+        )
         _generate_report(results, config_path)
+        _save_results_json(results)
         return results
 
     print("\n--- Phase 5: Running MRM Crew ---")

@@ -18,9 +18,18 @@ from reportlab.platypus import (
 from reportlab.lib.enums import TA_CENTER, TA_LEFT
 
 # Path to figures folder (relative to project root)
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 FIGURES_DIR = os.path.join(PROJECT_ROOT, "figures")
 
+def _get_dataset_display_name(path):
+    """Convert dataset path to a human-readable name."""
+    if "creditcard_2023" in path:
+        return "Fraud Detection - Credit Card Transactions (creditcard_2023.csv)"
+    elif "cs-training" in path:
+        return "Credit Scoring - Financial Distress Prediction (cs-training.csv)"
+    elif "credit_card_approval" in path:
+        return "Credit Card Approval Prediction (credit_card_approval.csv)"
+    return path or "data/credit_card_approval.csv"
 
 def generate_report(
     mode="auto",
@@ -30,16 +39,14 @@ def generate_report(
 ):
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
-    # Generate charts if figures/ folder is empty or missing
-    if not os.path.exists(FIGURES_DIR) or len(os.listdir(FIGURES_DIR)) < 3:
-        print("[Report] Generating charts into figures/ ...")
-        try:
-            import sys
-            sys.path.insert(0, PROJECT_ROOT)
-            from generate_charts import generate_all
-            generate_all()
-        except Exception as e:
-            print(f"[Report] Chart generation failed: {e}")
+    # Always regenerate charts to match current dataset
+    print("[Report] Generating charts into figures/ ...")
+    try:
+        from src.evaluation.generate_charts import generate_all
+        ds = results.get("dataset", "") if results else ""
+        generate_all(dataset_name=ds)
+    except Exception as e:
+        print(f"[Report] Chart generation failed: {e}")
 
     doc = SimpleDocTemplate(
         output_path, pagesize=A4,
@@ -98,7 +105,7 @@ def generate_report(
             return True
         else:
             story.append(Paragraph(
-                f"<i>[Figure not found: {filename}. Run: python -m src.generate_charts]</i>",
+                f"<i>[Figure not found: {filename}. Run: python -m src.evaluation.generate_charts]</i>",
                 styles['BodyText2']
             ))
             return False
@@ -142,7 +149,7 @@ def generate_report(
         ["Base Paper", "Agentic AI for Model Development & MRM (Okpala et al., 2025)"],
         ["Framework", "CrewAI + LangChain + LiteLLM"],
         ["LLM Provider", "Groq (Llama 3.3 70B) / Google Gemini / Ollama"],
-        ["Dataset", results.get("dataset", "data/credit_card_approval.csv") if results else "data/credit_card_approval.csv"],
+        ["Dataset", _get_dataset_display_name(results.get("dataset", "") if results else "")],
     ]
     it = Table(info_data, colWidths=[3.5*cm, 13*cm])
     it.setStyle(TableStyle([
@@ -306,21 +313,41 @@ def generate_report(
 
     # ==================== 6. EDA ====================
     story.append(Paragraph("6. EDA Visualizations", styles['SectionHead']))
+    dataset_name = results.get("dataset", "dataset") if results else "dataset"
     story.append(Paragraph(
-        "The EDA tool generates labeled plots for all dataset columns. "
-        "The credit card approval dataset has <b>690 rows x 16 columns</b> with "
-        "class balance: 55.6% negative vs 44.4% positive.",
+        f"The EDA tool generates labeled plots for all dataset columns. "
+        f"Dataset used: <b>{dataset_name}</b>. "
+        f"Plots below are generated from the dataset's statistical profile.",
         styles['BodyText2']
     ))
     add_figure("eda_plots.png", 16, 9.5, "Figure 4: EDA plots with distributions, value counts, and class balance")
 
-    story.append(make_table([
-        ["Statistic", "Col '0'", "Col '1.25'", "Col '01'", "Col '0.1'"],
-        ["Mean", "4.766", "2.225", "2.402", "1018.9"],
-        ["Std Dev", "4.978", "3.349", "4.866", "5213.7"],
-        ["Min", "0.000", "0.000", "0", "0"],
-        ["Max", "28.000", "28.500", "67", "100,000"],
-    ], [2.4*cm, 2.4*cm, 2.4*cm, 2.4*cm, 2.4*cm]))
+    # Dataset-specific statistics table
+    ds_name = results.get("dataset", "") if results else ""
+    if "creditcard_2023" in ds_name:
+        story.append(make_table([
+            ["Statistic", "V1 (PCA)", "V2 (PCA)", "V14 (PCA)", "Amount"],
+            ["Mean", "0.000", "0.000", "0.000", "88.35"],
+            ["Std Dev", "1.959", "1.651", "1.767", "250.12"],
+            ["Min", "-56.41", "-72.72", "-19.21", "0.00"],
+            ["Max", "2.45", "22.06", "10.53", "25,691"],
+        ], [2.4*cm, 2.4*cm, 2.4*cm, 2.4*cm, 2.4*cm]))
+    elif "cs-training" in ds_name:
+        story.append(make_table([
+            ["Statistic", "Revol. Util.", "Age", "Debt Ratio", "Monthly Income"],
+            ["Mean", "6.05", "52.3", "353.0", "6,670"],
+            ["Std Dev", "249.8", "14.8", "2,038", "14,384"],
+            ["Min", "0.000", "21", "0", "0"],
+            ["Max", "50,708", "109", "329,664", "3,008,750"],
+        ], [2.4*cm, 2.4*cm, 2.4*cm, 2.4*cm, 2.4*cm]))
+    else:
+        story.append(make_table([
+            ["Statistic", "Age", "Debt Ratio", "Years Employed", "Income"],
+            ["Mean", "4.766", "2.225", "2.402", "1018.9"],
+            ["Std Dev", "4.978", "3.349", "4.866", "5213.7"],
+            ["Min", "0.000", "0.000", "0", "0"],
+            ["Max", "28.000", "28.500", "67", "100,000"],
+        ], [2.4*cm, 2.4*cm, 2.4*cm, 2.4*cm, 2.4*cm]))
     story.append(PageBreak())
 
     # ==================== 7. RESULTS ====================
@@ -338,10 +365,23 @@ def generate_report(
         if len(timing) > 1:
             story.append(make_table(timing, [6*cm, 5*cm], "#27ae60"))
 
+        # Show modeling output
+        modeling_output = results.get("modeling_output", "")
+        if modeling_output and "rate_limit" not in modeling_output.lower():
+            story.append(Paragraph("7.1 Modeling Output (Terminal Log)", styles['SubSection']))
+            output_text = str(modeling_output)
+            if len(output_text) > 5000:
+                output_text = output_text[:5000] + "\n\n... [truncated — full output was " + str(len(str(modeling_output))) + " chars]"
+            story.append(Preformatted(output_text, styles['CodeStyle']))
+
+        # Show MRM verdict
         verdict = results.get("mrm_verdict", "")
         if verdict and "rate_limit" not in verdict.lower():
-            story.append(Paragraph("7.1 MRM Verdict", styles['SubSection']))
-            story.append(Preformatted(str(verdict)[:2000], styles['CodeStyle']))
+            story.append(Paragraph("7.2 MRM Verdict", styles['SubSection']))
+            verdict_text = str(verdict)
+            if len(verdict_text) > 3000:
+                verdict_text = verdict_text[:3000] + "\n\n... [truncated]"
+            story.append(Preformatted(verdict_text, styles['CodeStyle']))
     else:
         story.append(Paragraph("No results available. Run the pipeline first.", styles['BodyText2']))
     story.append(PageBreak())
@@ -381,8 +421,8 @@ def generate_report(
         "  src/manual/ .................. Base paper (Path A)",
         "  src/tools/ ................... Shared tools",
         "  src/evaluation/ .............. Comparison framework",
-        "  src/generate_charts.py ....... Chart generator",
-        "  src/report_generator.py ...... This PDF generator",
+        "  src/evaluation/generate_charts.py .. Chart generator",
+        "  src/evaluation/report_generator.py . This PDF generator",
         "  figures/ ..................... Generated charts (PNG)",
         "  configs/generated/ ........... Auto-saved JSON configs",
     ]

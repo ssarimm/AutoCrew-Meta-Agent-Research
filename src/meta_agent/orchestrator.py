@@ -71,6 +71,16 @@ class MetaAgentOrchestrator:
             subtasks, agent_map, tool_map, dataset_path, task_description
         )
 
+        # Post-process: ensure all code-executing tasks have dataset-specific instructions
+        for sid, instr in instructions.items():
+            desc = instr.get("task_description", "")
+            # Ensure dataset path is referenced
+            if dataset_path not in desc and any(
+                keyword in sid.lower() for keyword in ["task_0", "task_1", "task_2", "task_3"]
+            ):
+                if "code" in str(tool_map.get(sid, [])) or "execution" in str(tool_map.get(sid, [])):
+                    instr["task_description"] = desc + f"\n\nIMPORTANT: Use the dataset at '{dataset_path}'. Do NOT generate fake data."
+
         # Step 5: Generate the final JSON config
         config = self.json_generator.generate(
             task_description=task_description,

@@ -80,6 +80,8 @@ class ToolAssigner:
             response = self._call_llm(prompt, user_message)
             tool_map = self._parse_json(response)
 
+            # Validate: ensure code-writing agents have code_execution
+            tool_map = self._validate_tool_assignments(tool_map, agent_map)
             total_tools = sum(len(v) for v in tool_map.values())
             print(f"[Meta Agent] Assigned {total_tools} tools across {len(tool_map)} agents")
             return tool_map
@@ -88,6 +90,21 @@ class ToolAssigner:
             print(f"[Meta Agent] Tool assignment failed: {e}")
             print("[Meta Agent] Using fallback tool assignments...")
             return self._fallback_tools(agent_map)
+
+    def _validate_tool_assignments(self, tool_map: dict, agent_map: dict) -> dict:
+        """Ensure agents that need code execution actually have it."""
+        roles_needing_code = {
+            "ML Engineer", "Senior ML Engineer", "Data Analyst",
+            "Senior Data Scientist", "Stress Testing Engineer"
+        }
+        for sid, agent in agent_map.items():
+            role = agent.get("role", "")
+            tools = tool_map.get(sid, [])
+            if role in roles_needing_code and "code_execution" not in tools:
+                tools.append("code_execution")
+                tool_map[sid] = tools
+                print(f"[Meta Agent] Auto-added code_execution to {role} ({sid})")
+        return tool_map
 
     def _call_llm(self, system_prompt: str, user_message: str) -> str:
         if hasattr(self.llm, 'invoke'):
