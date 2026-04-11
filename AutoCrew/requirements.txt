@@ -1,0 +1,13 @@
+crewai
+crewai-tools
+langchain-groq
+langchain-google-genai
+langchain-community
+pandas
+scikit-learn
+numpy
+matplotlib
+seaborn
+python-dotenv
+reportlab
+litellm

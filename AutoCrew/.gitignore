@@ -1,0 +1,44 @@
+# Environment
+.env
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+
+# Temp files generated at runtime
+temp_script.py
+temp_eda.py
+
+# Generated outputs (recreated by the pipeline)
+results/
+figures/
+configs/generated/*.json
+
+# Data files (user must add their own)
+data/*
+!data/.gitkeep
+
+# Model artifacts
+*.pkl
+*.joblib
+*.h5
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Distribution
+dist/
+build/
+*.egg-info/

@@ -1,0 +1,8 @@
+# Auto detect text files and normalise line endings
+* text=auto
+
+# Force LF line endings for scripts
+*.py text eol=lf
+*.txt text eol=lf
+*.md text eol=lf
+*.json text eol=lf
