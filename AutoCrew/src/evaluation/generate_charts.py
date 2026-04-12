@@ -306,7 +306,7 @@ def generate_comparison():
                         _data = _json.load(_f)
                     meta_t = _data.get("meta_agent_time_sec", meta_t)
                     model_t = _data.get("modeling_time_sec", model_t)
-                    mrm_t = _data.get("mrm_time_sec", mrm_t) or 18.0
+                    mrm_t = _data.get("mrm_time_sec") if _data.get("mrm_time_sec") is not None else mrm_t
                     break
                 except:
                     pass
@@ -363,6 +363,106 @@ def generate_crew_structure():
     print(f"  Saved: {path}")
 
 
+def generate_model_comparison_chart(manual_metrics=None, auto_metrics=None):
+    """
+    Generate side-by-side model performance and timing comparison charts.
+    If metrics are None, tries to load from results/metrics.json.
+    Returns path to saved chart.
+    """
+    # Load from file if not provided
+    if manual_metrics is None or auto_metrics is None:
+        results_dir = os.path.join(os.path.dirname(FIGURES_DIR), "results")
+        metrics_file = os.path.join(results_dir, "metrics.json")
+        if os.path.exists(metrics_file):
+            import json as _json
+            with open(metrics_file) as f:
+                records = _json.load(f)
+            # Use most recent record of each mode
+            for r in sorted(records, key=lambda x: x.get("timestamp", ""), reverse=True):
+                if r.get("mode") == "manual" and manual_metrics is None:
+                    manual_metrics = r
+                elif r.get("mode") == "auto" and auto_metrics is None:
+                    auto_metrics = r
+                if manual_metrics and auto_metrics:
+                    break
+
+    def _val(m, key, default=0.0):
+        if not m:
+            return default
+        v = m.get(key, default)
+        return float(v) if v is not None and v != -1 else default
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+    fig.suptitle("Path A (Manual) vs Path B (AutoCrew) — Performance Comparison",
+                 fontsize=14, fontweight="bold", y=1.02)
+
+    # --- Left: Model metrics bar chart ---
+    metric_keys = ["accuracy", "f1_score", "precision", "recall"]
+    metric_labels = ["Accuracy", "F1 Score", "Precision", "Recall"]
+    manual_vals = [_val(manual_metrics, k) for k in metric_keys]
+    auto_vals = [_val(auto_metrics, k) for k in metric_keys]
+
+    x = np.arange(len(metric_labels))
+    width = 0.35
+    bars1 = axes[0].bar(x - width / 2, manual_vals, width,
+                        label="Path A: Manual", color="#4A90D9", alpha=0.85, edgecolor="black")
+    bars2 = axes[0].bar(x + width / 2, auto_vals, width,
+                        label="Path B: AutoCrew", color="#48BB78", alpha=0.85, edgecolor="black")
+
+    axes[0].set_ylabel("Score", fontsize=11)
+    axes[0].set_title("Model Performance Scores", fontsize=12, fontweight="bold")
+    axes[0].set_xticks(x)
+    axes[0].set_xticklabels(metric_labels, fontsize=10)
+    axes[0].set_ylim(0, 1.2)
+    axes[0].legend(fontsize=10)
+    axes[0].grid(axis="y", alpha=0.3)
+    for bar in list(bars1) + list(bars2):
+        h = bar.get_height()
+        if h > 0.001:
+            axes[0].text(bar.get_x() + bar.get_width() / 2., h + 0.015,
+                         f"{h:.3f}", ha="center", va="bottom", fontsize=8)
+
+    # --- Right: Timing comparison bar chart ---
+    timing_labels = ["Meta Agent\nSetup", "Modeling", "MRM", "Total"]
+    manual_times = [
+        0,
+        _val(manual_metrics, "modeling_time_sec"),
+        _val(manual_metrics, "mrm_time_sec"),
+        _val(manual_metrics, "total_time_sec"),
+    ]
+    auto_times = [
+        _val(auto_metrics, "meta_agent_time_sec"),
+        _val(auto_metrics, "modeling_time_sec"),
+        _val(auto_metrics, "mrm_time_sec"),
+        _val(auto_metrics, "total_time_sec"),
+    ]
+
+    x2 = np.arange(len(timing_labels))
+    bars3 = axes[1].bar(x2 - width / 2, manual_times, width,
+                        label="Path A: Manual", color="#4A90D9", alpha=0.85, edgecolor="black")
+    bars4 = axes[1].bar(x2 + width / 2, auto_times, width,
+                        label="Path B: AutoCrew", color="#48BB78", alpha=0.85, edgecolor="black")
+
+    axes[1].set_ylabel("Time (seconds)", fontsize=11)
+    axes[1].set_title("Execution Time Breakdown", fontsize=12, fontweight="bold")
+    axes[1].set_xticks(x2)
+    axes[1].set_xticklabels(timing_labels, fontsize=10)
+    axes[1].legend(fontsize=10)
+    axes[1].grid(axis="y", alpha=0.3)
+    for bar in list(bars3) + list(bars4):
+        h = bar.get_height()
+        if h > 0.5:
+            axes[1].text(bar.get_x() + bar.get_width() / 2., h + 0.5,
+                         f"{h:.0f}s", ha="center", va="bottom", fontsize=8)
+
+    plt.tight_layout()
+    path = os.path.join(FIGURES_DIR, "model_comparison.png")
+    plt.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"  Saved: {path}")
+    return path
+
+
 def generate_all(dataset_name=None):
     """Generate all charts."""
     print(f"\nGenerating charts into: {FIGURES_DIR}")
@@ -371,7 +471,8 @@ def generate_all(dataset_name=None):
     generate_pipeline()
     generate_comparison()
     generate_crew_structure()
-    print(f"\nAll 5 charts saved to {FIGURES_DIR}/")
+    generate_model_comparison_chart()
+    print(f"\nAll 6 charts saved to {FIGURES_DIR}/")
 
 
 if __name__ == "__main__":

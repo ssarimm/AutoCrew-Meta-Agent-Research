@@ -12,16 +12,27 @@ For each subtask, produce:
 
 Rules:
 - For code-executing agents: tell them EXACTLY what to code step by step, what libraries to import, what to print
+- CRITICAL: Every code execution is a completely fresh process. Each script MUST start by importing all libraries and loading the dataset from its path. Never reference variables from a previous tool call — they do not exist.
+- CRITICAL: Each agent must complete its entire job in ONE single code execution call, not multiple. Load data, process, train, and print results all in one script.
 - CRITICAL: For data loading, ALWAYS include: replace '?' with NaN, drop NaN rows, use LabelEncoder on object columns
 - CRITICAL: Before using ANY sklearn transformer (StandardScaler, PolynomialFeatures, etc.), ALWAYS handle NaN first: df.dropna() or df.fillna(df.median(numeric_only=True)). Never pass NaN values to sklearn.
-- CRITICAL: For model training, specify: use RandomForestClassifier(n_estimators=100, random_state=42), print Accuracy and F1 Score using sklearn.metrics
+- CRITICAL: For model training, choose an appropriate sklearn classification algorithm based on the task (e.g. RandomForestClassifier, GradientBoostingClassifier, LogisticRegression). Print Accuracy, F1 Score, Precision, and Recall using sklearn.metrics.
+- CRITICAL: For the target column — if the task description explicitly names it (e.g. 'SeriousDlqin2yrs', 'Class'), use that exact name. If the task description does NOT name the target column, detect it dynamically with: known = {'SeriousDlqin2yrs', 'Class'}; target_col = next((c for c in known if c in df.columns), df.columns[-1]). NEVER invent column names like 'credit_approved', 'label', 'target', 'outcome', 'approved', 'p', 'q' — these will cause a KeyError and crash the script. Also drop any index columns (e.g. 'Unnamed: 0') before splitting X and y.
+- CRITICAL: NEVER trust column names from the context or outputs of previous tasks — prior agents may hallucinate renamed columns (e.g. calling the last column 'p' instead of its real name '+'). Always determine column names by loading the CSV file directly in your script and reading df.columns at runtime.
+- CRITICAL: For ANY task involving model evaluation, metrics reporting, or model card creation: the script MUST include the FULL pipeline — load raw CSV, replace '?', dropna, encode categoricals, split X/y, train a fresh RandomForestClassifier, predict, and print metrics. NEVER write code that assumes a saved model or preprocessed data from a previous task exists. Every script starts with a blank slate.
 - CRITICAL: Tell agents to NEVER generate synthetic or fake data — not even as a fallback if the file is not found. Always use the exact dataset path provided. If the file is missing, the agent must report the error and stop.
 - CRITICAL: Always embed the exact dataset path (e.g. 'data/cs-training.csv') directly in the task_description string. Never write vague instructions like "load the data".
+- CRITICAL: For EDA/analysis tasks: if the agent has the exploratory_data_analysis tool, tell it to use ONLY that tool and stop — do NOT also call execute_python_code for EDA. Using both wastes tokens and causes rate limit errors. If the agent only has execute_python_code, use ONLY pandas text output (print statements), no matplotlib/seaborn.
+- CRITICAL: NEVER use f-strings (f"...{var}...") in ANY print statement inside task_description. F-string curly braces break JSON serialization. Instead use: print("Accuracy:", round(accuracy, 4)) or print("Accuracy: " + str(round(accuracy, 4))). This applies to ALL metric prints.
+- CRITICAL: In ALL Python code inside task_description, use ONLY single quotes for string literals. NEVER use double quotes. Write pd.read_csv('data/file.csv') NOT pd.read_csv("data/file.csv"). Double quotes inside a JSON string value break the tool input parser, causing SyntaxError. This applies to every string in every line of code.
+- CRITICAL: Always call df.dropna() on the FULL DataFrame BEFORE splitting into X and y. NEVER call X.dropna() or y.dropna() separately — this misaligns row counts and causes ValueError in train_test_split.
+- CRITICAL: Do NOT use StandardScaler or any feature scaler. RandomForestClassifier does not require feature scaling, and adding a scaler after separate dropna causes row count mismatches.
+- For documentation/model card tasks: the model card MUST explicitly state the Algorithm name used, Dataset path, and all Performance Metrics (Accuracy, F1 Score, Precision, Recall). These fields are required for MRM compliance checks.
+- For verdict/approval tasks: base the APPROVED/REJECTED decision primarily on model performance (Accuracy > 0.7 and Stress Test results). Documentation compliance is informational — do NOT reject a well-performing model solely due to minor documentation gaps.
 - For analysis agents: tell them what to look for and how to format findings
-- For writers: tell them what sections to include in the document
 - ALWAYS include the dataset path in descriptions where the agent needs to load data
 - Be specific about metric names: "Accuracy", "F1 Score", "Precision", "Recall"
-- For stress testing: tell them to multiply numeric features by 1.5 and re-predict
+- For stress testing: tell them to multiply numeric features by 1.5, re-predict, and print "Stress Test Passed" or "Stress Test Warning"
 
 IMPORTANT: Respond with ONLY valid JSON, no markdown:
 
@@ -106,9 +117,19 @@ class InstructionWriter:
             response = self.llm.invoke(messages)
             return response.content if hasattr(response, 'content') else str(response)
         else:
-            full_prompt = f"{system_prompt}\n\n{user_message}"
-            response = self.llm.call(full_prompt)
-            return str(response)
+            import litellm
+            response = litellm.completion(
+                model=self.llm.model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_message},
+                ],
+                temperature=getattr(self.llm, 'temperature', 0.2),
+                api_key=getattr(self.llm, 'api_key', None),
+                base_url=getattr(self.llm, 'base_url', None),
+                max_tokens=2500,  # instructions: 7 tasks × ~300 tokens each — extra headroom to avoid mid-JSON truncation
+            )
+            return response.choices[0].message.content
 
     def _parse_json(self, response: str) -> dict:
         text = response.strip()
@@ -119,146 +140,134 @@ class InstructionWriter:
         return json.loads(text)
 
     def _fallback_instructions(
-        self, subtasks, agent_map, dataset_path, task_description
+        self, subtasks, agent_map, dataset_path, task_description=None
     ) -> dict:
         """Generate detailed, dataset-aware instructions from subtask info."""
         instructions = {}
 
         for st in subtasks:
             sid = st["id"]
-            role = agent_map.get(sid, {}).get("role", "Agent")
             name = st["name"]
             desc = st["description"]
+            combined = (name + " " + desc).lower()
 
-            if "data" in name.lower() and ("load" in name.lower() or "extract" in name.lower()):
+            # MRM-specific checks come FIRST to avoid mismatching with generic keywords
+            if "compliance" in combined or ("review" in combined and "document" in combined):
                 task_desc = (
-                    f"Write and execute Python code to load '{dataset_path}' using pandas. "
-                    f"Replace '?' with NaN using df.replace('?', pd.np.nan if hasattr(pd, 'np') else float('nan')). "
-                    f"Print df.shape, df.dtypes, and df.head(). "
-                    f"Print the number of missing values per column. "
-                    f"Output the shape and column types of the loaded data in the format: "
-                    f"'Data shape: (rows, columns), Column types: column1:type, column2:type,...'"
+                    f"Review the modeling output for MRM documentation completeness. "
+                    f"Check if these fields are present: algorithm name, dataset path, "
+                    f"performance metrics (Accuracy, F1 Score), and model limitations. "
+                    f"Output: PASS if all present, FAIL with list of missing items."
                 )
-                expected = "Data summary with shape, columns, types, and missing value counts."
+                expected = "Compliance check: PASS or FAIL with list of missing items."
 
-            elif "eda" in name.lower() or "exploratory" in name.lower():
+            elif "stress" in combined or "replicat" in combined:
                 task_desc = (
-                    f"Perform exploratory data analysis on '{dataset_path}'. "
-                    f"Write Python code using pandas to: "
-                    f"1. Load the data and replace '?' with NaN. "
-                    f"2. Print shape, dtypes, and missing value counts. "
-                    f"3. Print value counts for the target column (last column). "
-                    f"4. Print descriptive statistics using df.describe(). "
-                    f"5. Identify class balance of the target variable. "
-                    f"Print all findings clearly with labels."
+                    f"Write and execute a complete Python script to stress test the model on '{dataset_path}'. "
+                    f"Steps (all in ONE script): "
+                    f"1. import pandas as pd, numpy as np, from sklearn.model_selection import train_test_split, "
+                    f"from sklearn.ensemble import RandomForestClassifier, from sklearn.preprocessing import LabelEncoder, "
+                    f"from sklearn.metrics import accuracy_score, f1_score "
+                    f"2. df = pd.read_csv('{dataset_path}'); df = df.replace('?', np.nan); df = df.dropna() "
+                    f"3. Encode all object columns with LabelEncoder "
+                    f"4. Detect target column: known = {{'SeriousDlqin2yrs', 'Class'}}; "
+                    f"target_col = next((c for c in known if c in df.columns), df.columns[-1]); "
+                    f"X = df.drop(columns=[target_col] + [c for c in df.columns if 'unnamed' in c.lower()]); y = df[target_col] "
+                    f"5. X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42) "
+                    f"6. model = RandomForestClassifier(n_estimators=100, random_state=42); model.fit(X_train, y_train) "
+                    f"7. y_pred = model.predict(X_test); print('Baseline Accuracy:', accuracy_score(y_test, y_pred)) "
+                    f"8. X_test_s = X_test.copy(); X_test_s *= 1.5; y_pred_s = model.predict(X_test_s) "
+                    f"9. stressed_acc = accuracy_score(y_test, y_pred_s); print('Stressed Accuracy:', stressed_acc) "
+                    f"10. print('Stress Test Passed') if stressed_acc > 0.5 else print('Stress Test Warning')"
                 )
-                expected = "EDA report with distributions, missing values, class balance, and statistics."
+                expected = "Baseline Accuracy, Stressed Accuracy, Stress Test Passed or Warning."
 
-            elif "feature" in name.lower() or "preprocess" in name.lower():
+            elif "soundness" in combined or ("validation" in combined and "model" in combined) or "feature importance" in combined:
                 task_desc = (
-                    f"Write and execute Python code to preprocess '{dataset_path}' for binary classification. "
-                    f"Steps: "
-                    f"1. Load CSV with pandas. "
-                    f"2. Replace '?' with NaN, then drop rows with NaN (df.dropna()). "
-                    f"3. Use LabelEncoder from sklearn.preprocessing on ALL object/categorical columns. "
-                    f"4. Convert all columns to numeric with pd.to_numeric(errors='coerce'). "
-                    f"5. Use the LAST column as the target variable y, everything else as X. "
-                    f"6. Print the transformed data shape and column types. "
-                    f"7. Print 'Preprocessing complete. X shape: ..., y shape: ...'"
-                )
-                expected = "Transformed dataset summary with shapes and confirmation of preprocessing."
-
-            elif "train" in name.lower() or "model" in name.lower() and "select" in name.lower() or "tuning" in name.lower():
-                task_desc = (
-                    f"Write and execute Python code to train a classifier on '{dataset_path}'. "
-                    f"IMPORTANT - Follow these exact steps: "
-                    f"1. import pandas as pd, numpy as np "
-                    f"2. from sklearn.model_selection import train_test_split "
-                    f"3. from sklearn.ensemble import RandomForestClassifier "
-                    f"4. from sklearn.preprocessing import LabelEncoder "
-                    f"5. from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score "
-                    f"6. Load '{dataset_path}' with pd.read_csv(). "
-                    f"7. Replace '?' with NaN: df = df.replace('?', np.nan) "
-                    f"8. Drop NaN rows: df = df.dropna() "
-                    f"9. Encode categorical columns: for col in df.select_dtypes(include='object').columns: df[col] = LabelEncoder().fit_transform(df[col]) "
-                    f"10. Set X = df.iloc[:, :-1], y = df.iloc[:, -1] "
-                    f"11. Split: X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42) "
-                    f"12. Train: model = RandomForestClassifier(n_estimators=100, random_state=42); model.fit(X_train, y_train) "
-                    f"13. Predict: y_pred = model.predict(X_test) "
-                    f"14. Print EXACTLY these lines: "
-                    f"    print(f'Accuracy: {{accuracy_score(y_test, y_pred):.4f}}') "
-                    f"    print(f'F1 Score: {{f1_score(y_test, y_pred, average=\"weighted\"):.4f}}') "
-                    f"    print(f'Precision: {{precision_score(y_test, y_pred, average=\"weighted\"):.4f}}') "
-                    f"    print(f'Recall: {{recall_score(y_test, y_pred, average=\"weighted\"):.4f}}') "
-                    f"DO NOT generate synthetic/fake data. Use ONLY the real dataset."
-                )
-                expected = "Model: RandomForest, Metrics: Accuracy=X.XX, F1 Score=X.XX, Precision=X.XX, Recall=X.XX"
-
-            elif "evaluat" in name.lower():
-                task_desc = (
-                    f"Evaluate the trained model on the test set from '{dataset_path}'. "
-                    f"Print Accuracy, F1 Score, Precision, and Recall. "
-                    f"Use sklearn.metrics functions. {desc}"
-                )
-                expected = "Evaluation metrics: Accuracy, F1 Score, Precision, Recall."
-
-            elif "document" in name.lower() or "model card" in name.lower():
-                task_desc = (
-                    f"Write a Model Card based on the metrics from previous tasks. "
-                    f"Include sections: Model Name, Dataset, Task Description, "
-                    f"Preprocessing Steps, Algorithm Used, Performance Metrics, "
-                    f"Limitations, and Intended Use. {desc}"
-                )
-                expected = "Text Model Card with all required sections."
-
-            elif "compliance" in name.lower():
-                task_desc = (
-                    f"Review the modeling output for documentation completeness. "
-                    f"Check if these sections exist: data sources, model methodology, "
-                    f"performance metrics (Accuracy, F1), and model limitations. "
-                    f"Output a compliance report with status for each section. {desc}"
-                )
-                expected = "Compliance report with pass/fail for each required section."
-
-            elif "stress" in name.lower() or "replicat" in name.lower():
-                task_desc = (
-                    f"Write and execute Python code to replicate and stress test the model: "
-                    f"1. Load '{dataset_path}' with pandas. "
-                    f"2. Replace '?' with NaN, drop NaN rows. "
-                    f"3. LabelEncoder on object columns. "
-                    f"4. X = df.iloc[:, :-1], y = df.iloc[:, -1]. "
-                    f"5. Split 80/20 with random_state=42. "
-                    f"6. Train RandomForestClassifier(n_estimators=100, random_state=42). "
-                    f"7. Print replicated Accuracy and F1 Score. "
-                    f"8. STRESS TEST: multiply all X_test numeric values by 1.5. "
-                    f"9. Re-predict and print stressed Accuracy. "
-                    f"10. Print 'Stress Test Passed' if stressed accuracy > 0.5, else 'Stress Test Warning'. "
-                    f"11. Print 'Replication: PASS' if replicated accuracy matches original within 0.01."
-                )
-                expected = "Replicated metrics, stress test result (Passed/Warning), and replication status."
-
-            elif "soundness" in name.lower() or "validation" in name.lower() or "feature importance" in name.lower():
-                task_desc = (
-                    f"Assess the conceptual soundness of using a Random Forest classifier "
-                    f"for credit card approval prediction. Evaluate: "
-                    f"1. Is Random Forest appropriate for this binary classification task? "
-                    f"2. Are the features reasonable predictors of credit approval? "
-                    f"3. Is the model interpretable enough for financial regulation? "
-                    f"4. What are the risks of using this model in production? "
-                    f"Output a soundness report with: Conceptual soundness: [sound/unsound], "
-                    f"Findings, and Recommendations."
+                    f"Assess the conceptual soundness of the ML model used for the following task: "
+                    f"'{task_description or desc}'. Dataset: '{dataset_path}'. Evaluate: "
+                    f"1. Is the chosen algorithm appropriate for this binary classification task? "
+                    f"2. Are the dataset features reasonable predictors for the target variable? "
+                    f"3. Is the model interpretable enough for financial regulation compliance? "
+                    f"4. What are the production risks of deploying this model? "
+                    f"Output: Conceptual soundness: [sound/unsound], Findings, Recommendations."
                 )
                 expected = "Conceptual soundness report with findings and recommendations."
 
-            elif "verdict" in name.lower() or "approval" in name.lower():
+            elif "verdict" in combined or ("approval" in combined and "final" in combined):
                 task_desc = (
-                    f"Based on the compliance check, stress test, and model validation results, "
-                    f"issue a FINAL VERDICT. "
-                    f"If accuracy > 0.7 and stress test passed and documentation is compliant, "
-                    f"verdict is APPROVED. Otherwise REJECTED. "
-                    f"Provide clear reasoning for the decision."
+                    f"Issue a FINAL VERDICT based on the stress test results. "
+                    f"VERDICT RULE: Base APPROVED/REJECTED on model performance ONLY — not on documentation gaps. "
+                    f"- If Baseline Accuracy > 0.7 AND 'Stress Test Passed': FINAL VERDICT: APPROVED "
+                    f"- Otherwise: FINAL VERDICT: REJECTED "
+                    f"State your verdict clearly and give 1-2 sentences of reasoning."
                 )
-                expected = "Final verdict: APPROVED or REJECTED with detailed reasoning."
+                expected = "FINAL VERDICT: APPROVED or REJECTED with reasoning."
+
+            # Modeling-specific checks
+            elif "data" in combined and ("load" in combined or "extract" in combined):
+                task_desc = (
+                    f"Write and execute Python code to load '{dataset_path}' using pandas. "
+                    f"Replace '?' with NaN: df = df.replace('?', float('nan')). "
+                    f"Print df.shape, list(df.columns), df.dtypes, and df.isnull().sum()."
+                )
+                expected = "Data summary with shape, columns, types, and missing value counts."
+
+            elif "eda" in combined or "exploratory" in combined:
+                task_desc = (
+                    f"Perform exploratory data analysis on '{dataset_path}' using ONLY pandas "
+                    f"(NO matplotlib, NO seaborn — text output only). "
+                    f"1. df = pd.read_csv('{dataset_path}'); df = df.replace('?', float('nan')) "
+                    f"2. print(df.shape); print(df.dtypes); print(df.isnull().sum()) "
+                    f"3. print(df.describe()); print(df.iloc[:, -1].value_counts())"
+                )
+                expected = "EDA report with shape, dtypes, missing values, descriptive stats, class balance."
+
+            elif "feature" in combined or "preprocess" in combined:
+                task_desc = (
+                    f"Write and execute Python code to preprocess '{dataset_path}' for binary classification. "
+                    f"1. import pandas as pd, numpy as np; from sklearn.preprocessing import LabelEncoder "
+                    f"2. df = pd.read_csv('{dataset_path}'); df = df.replace('?', np.nan); df = df.dropna() "
+                    f"3. LabelEncoder on all object columns "
+                    f"4. Detect target: known = {{'SeriousDlqin2yrs', 'Class'}}; "
+                    f"target_col = next((c for c in known if c in df.columns), df.columns[-1]); "
+                    f"X = df.drop(columns=[target_col] + [c for c in df.columns if 'unnamed' in c.lower()]); y = df[target_col] "
+                    f"5. print('Preprocessing complete. X shape:', X.shape, 'y shape:', y.shape)"
+                )
+                expected = "Preprocessing confirmation with X and y shapes."
+
+            elif "train" in combined or ("model" in combined and "select" in combined) or "tuning" in combined or "evaluat" in combined:
+                task_desc = (
+                    f"Write and execute a complete self-contained Python script on '{dataset_path}'. "
+                    f"1. import pandas as pd, numpy as np "
+                    f"   from sklearn.model_selection import train_test_split "
+                    f"   from sklearn.ensemble import RandomForestClassifier "
+                    f"   from sklearn.preprocessing import LabelEncoder "
+                    f"   from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score "
+                    f"2. df = pd.read_csv('{dataset_path}'); df = df.replace('?', np.nan); df = df.dropna() "
+                    f"3. Encode all object columns with LabelEncoder "
+                    f"4. known = {{'SeriousDlqin2yrs', 'Class'}}; "
+                    f"target_col = next((c for c in known if c in df.columns), df.columns[-1]); "
+                    f"X = df.drop(columns=[target_col] + [c for c in df.columns if 'unnamed' in c.lower()]); y = df[target_col] "
+                    f"5. X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42) "
+                    f"6. model = RandomForestClassifier(n_estimators=100, random_state=42); model.fit(X_train, y_train) "
+                    f"7. y_pred = model.predict(X_test) "
+                    f"8. print('Accuracy:', round(accuracy_score(y_test, y_pred), 4)) "
+                    f"   print('F1 Score:', round(f1_score(y_test, y_pred, average='weighted'), 4)) "
+                    f"   print('Precision:', round(precision_score(y_test, y_pred, average='weighted'), 4)) "
+                    f"   print('Recall:', round(recall_score(y_test, y_pred, average='weighted'), 4))"
+                )
+                expected = "Accuracy, F1 Score, Precision, Recall printed to stdout."
+
+            elif "document" in combined or "model card" in combined:
+                task_desc = (
+                    f"Write a Model Card based on the metrics from previous tasks. "
+                    f"REQUIRED fields: Model Name, Algorithm Used, Dataset ({dataset_path}), "
+                    f"Task ({task_description or desc}), Accuracy, F1 Score, Precision, Recall, "
+                    f"Preprocessing Steps, Limitations, Intended Use. "
+                    f"State each field on a separate line."
+                )
+                expected = "Model Card with all required fields including Algorithm, Dataset, and metrics."
 
             else:
                 task_desc = desc

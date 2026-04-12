@@ -46,7 +46,7 @@ class CrewBuilder:
             tasks=task_list,
             process=process,
             memory=False,
-            verbose=True,
+            verbose=False,  # disables Live status tree; agent panels still show via Agent.verbose
         )
 
         return crew
@@ -65,6 +65,7 @@ class CrewBuilder:
             llm=self.llm,
             verbose=True,
             allow_delegation=agent_def.get("allow_delegation", False),
+            max_iter=8,
         )
 
         return agent

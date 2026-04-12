@@ -35,12 +35,34 @@ class MetricsCollector:
         metrics["mrm_time_sec"] = results.get("mrm_time_sec", 0)
         metrics["total_time_sec"] = results.get("total_time_sec", 0)
 
-        # Extract ML metrics from modeling output text
+        # Extract ML metrics from modeling output text.
+        # Fallback: if modeling crew failed to produce metrics, also scan the MRM stress test
+        # output — the stress tester re-trains the model and prints Baseline Accuracy.
         output_text = results.get("modeling_output", "")
         metrics["accuracy"] = self._extract_metric(output_text, "accuracy")
         metrics["f1_score"] = self._extract_metric(output_text, "f1")
         metrics["precision"] = self._extract_metric(output_text, "precision")
         metrics["recall"] = self._extract_metric(output_text, "recall")
+
+        # Fallback: if modeling output had no metrics, check MRM verdict/output
+        mrm_text = results.get("mrm_verdict", "")
+        if metrics["accuracy"] == -1.0 and mrm_text:
+            acc = self._extract_metric(mrm_text, "accuracy")
+            # Only use MRM accuracy if it looks like a real model accuracy (not rounded to 1 decimal)
+            if acc != -1.0 and len(str(acc).rstrip("0").rstrip(".")) > 3:
+                metrics["accuracy"] = acc
+        if metrics["f1_score"] == -1.0 and mrm_text:
+            f1 = self._extract_metric(mrm_text, "f1")
+            if f1 != -1.0 and len(str(f1).rstrip("0").rstrip(".")) > 3:
+                metrics["f1_score"] = f1
+        if metrics["precision"] == -1.0 and mrm_text:
+            p = self._extract_metric(mrm_text, "precision")
+            if p != -1.0 and len(str(p).rstrip("0").rstrip(".")) > 3:
+                metrics["precision"] = p
+        if metrics["recall"] == -1.0 and mrm_text:
+            r = self._extract_metric(mrm_text, "recall")
+            if r != -1.0 and len(str(r).rstrip("0").rstrip(".")) > 3:
+                metrics["recall"] = r
 
         # MRM verdict
         verdict_text = results.get("mrm_verdict", "")
@@ -72,7 +94,8 @@ class MetricsCollector:
             rf"{metric_name}\s*[:=]\s*([\d.]+)",
             rf"{metric_name}\s*score\s*[:=]\s*([\d.]+)",
             rf"{metric_name}\s*\(.*?\)\s*[:=]\s*([\d.]+)",
-            rf"{metric_name}\s*.*?:\s*([\d.]+)",
+            # Matches: "F1 Score: 0.85" or "Accuracy: 0.90" (from print("Accuracy:", round(...)))
+            rf"{metric_name}[^:\n]*?:\s*([\d.]+)",
             rf"'{metric_name}'.*?:\s*([\d.]+)",
             rf"{metric_name}.*?(0\.\d+)",
             rf"{metric_name}.*?(\d+\.\d+)%",

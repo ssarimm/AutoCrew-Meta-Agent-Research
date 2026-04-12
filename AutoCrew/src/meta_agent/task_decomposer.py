@@ -16,6 +16,13 @@ Consider these standard financial modeling steps:
 6. Model Evaluation
 7. Documentation / Model Card Writing
 
+CRITICAL CONSTRAINTS:
+- You MUST include a model training step in your modeling_subtasks. A pipeline without training is invalid.
+- Generate AT MOST 4 modeling subtasks and 3 MRM subtasks (API rate limit).
+- If 4 subtasks are not enough to include all steps, prioritize: Data Loading, Preprocessing, Model Training, Documentation. EDA and Model Selection are optional if slots are limited.
+- MRM subtasks MUST include a stress testing subtask (multiply numeric features by 1.5, re-predict, compare accuracy). The stress test must execute real code on the real dataset — it is NOT optional.
+- MRM subtasks MUST end with a final verdict subtask that cites stress test accuracy and baseline accuracy.
+
 Also consider these MRM (Model Risk Management) steps:
 1. Documentation Compliance Check
 2. Model Replication
@@ -101,9 +108,6 @@ class TaskDecomposer:
 
     def _call_llm(self, system_prompt: str, user_message: str) -> str:
         """Call the LLM and return raw text response."""
-        from crewai import LLM
-
-        # Handle different LLM types
         if hasattr(self.llm, 'invoke'):
             # LangChain-style (Gemini, FakeListChatModel)
             from langchain_core.messages import SystemMessage, HumanMessage
@@ -113,18 +117,21 @@ class TaskDecomposer:
             ]
             response = self.llm.invoke(messages)
             return response.content if hasattr(response, 'content') else str(response)
-
-        elif hasattr(self.llm, 'call'):
-            # CrewAI LLM wrapper (Groq, Ollama)
-            full_prompt = f"{system_prompt}\n\n{user_message}"
-            response = self.llm.call(full_prompt)
-            return str(response)
-
         else:
-            # Fallback: try direct call
-            full_prompt = f"{system_prompt}\n\n{user_message}"
-            response = self.llm.call(full_prompt)
-            return str(response)
+            # Use litellm directly to bypass CrewAI's event bus (prevents display spam)
+            import litellm
+            response = litellm.completion(
+                model=self.llm.model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_message},
+                ],
+                temperature=getattr(self.llm, 'temperature', 0.2),
+                api_key=getattr(self.llm, 'api_key', None),
+                base_url=getattr(self.llm, 'base_url', None),
+                max_tokens=600,  # decomposition: 4 subtasks JSON fits in ~400 tokens
+            )
+            return response.choices[0].message.content
 
     def _parse_json(self, response: str) -> dict:
         """Parse JSON from LLM response, handling markdown fences."""

@@ -14,6 +14,7 @@ class EDAtool(BaseTool):
     def _run(self, data_path: str) -> str:
         eda_code = f'''
 import pandas as pd
+import numpy as np
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -54,14 +55,13 @@ print("\\n--- Correlation (top pairs) ---")
 numeric_df = df.select_dtypes(include=["number"])
 if len(numeric_df.columns) > 1:
     corr = numeric_df.corr().abs()
-    upper = corr.where(
-        pd.np.triu(pd.np.ones(corr.shape), k=1).astype(bool)
-    ) if hasattr(pd, "np") else corr
     pairs = []
-    for col in corr.columns:
-        for idx in corr.index:
-            if col != idx and abs(corr.loc[idx, col]) > 0.5:
-                pairs.append((idx, col, round(corr.loc[idx, col], 3)))
+    cols = corr.columns.tolist()
+    for i in range(len(cols)):
+        for j in range(i + 1, len(cols)):
+            val = corr.iloc[i, j]
+            if val > 0.5:
+                pairs.append((cols[i], cols[j], round(val, 3)))
     pairs = sorted(pairs, key=lambda x: x[2], reverse=True)[:10]
     if pairs:
         for a, b, c in pairs:
@@ -85,7 +85,10 @@ else:
             if result.returncode != 0:
                 return f"EDA Error:\n{result.stderr}"
 
-            return result.stdout.strip()
+            output = result.stdout.strip()
+            if len(output) > 3000:
+                output = output[:3000] + f"\n... [EDA output truncated at 3000 chars — {len(result.stdout.strip())} total]"
+            return output
 
         except Exception as e:
             return f"EDA System Error: {str(e)}"

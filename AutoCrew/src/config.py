@@ -2,9 +2,8 @@ import os
 from dotenv import load_dotenv
 from crewai import LLM
 from langchain_community.chat_models import FakeListChatModel
-from langchain_google_genai import ChatGoogleGenerativeAI
 
-load_dotenv()
+load_dotenv(override=True)
 
 import litellm
 litellm.drop_params = True
@@ -32,6 +31,36 @@ def get_llm(choice=None):
 
         return LLM(
             model="groq/llama-3.3-70b-versatile",
+            api_key=api_key,
+            temperature=0.2,
+            timeout=120
+        )
+
+    # --- GROQ: LLAMA 4 SCOUT (higher limits) ---
+    elif choice == "5":
+        print("Using GROQ (Llama 4 Scout 17B — 500K TPD, 30K TPM)...")
+        api_key = os.getenv("GROQ_API_KEY")
+        if not api_key:
+            api_key = input("Enter Groq API Key (gsk_...): ")
+            os.environ["GROQ_API_KEY"] = api_key
+
+        return LLM(
+            model="groq/meta-llama/llama-4-scout-17b-16e-instruct",
+            api_key=api_key,
+            temperature=0.2,
+            timeout=120
+        )
+
+    # --- GROQ: LLAMA 3.1 8B INSTANT (max RPD, fast) ---
+    elif choice == "6":
+        print("Using GROQ (Llama 3.1 8B Instant — 500K TPD, 14.4K RPD)...")
+        api_key = os.getenv("GROQ_API_KEY")
+        if not api_key:
+            api_key = input("Enter Groq API Key (gsk_...): ")
+            os.environ["GROQ_API_KEY"] = api_key
+
+        return LLM(
+            model="groq/llama-3.1-8b-instant",
             api_key=api_key,
             temperature=0.2,
             timeout=120
@@ -86,13 +115,15 @@ def get_llm(choice=None):
 def select_llm_interactive():
     """Interactive LLM selection menu. Returns (llm, choice_str)."""
     print("\nSelect LLM Provider:")
-    print("1. Groq (Llama 3.3 70B)")
-    print("2. Google Gemini 2.0 Flash")
+    print("1. Groq — Llama 3.3 70B        (100K TPD,  12K TPM  — high quality)")
+    print("2. Google Gemini 2.0 Flash      (very high limits)")
     print("3. Ollama (Local LLM)")
     print("4. Mock LLM (Testing)")
-    choice = input("Choice (1-4): ").strip()
+    print("5. Groq — Llama 4 Scout 17B    (500K TPD,  30K TPM  — RECOMMENDED)")
+    print("6. Groq — Llama 3.1 8B Instant (500K TPD, 14.4K RPD — fastest)")
+    choice = input("Choice (1-6): ").strip()
 
-    if choice not in ["1", "2", "3", "4"]:
+    if choice not in ["1", "2", "3", "4", "5", "6"]:
         print("Invalid choice. Exiting.")
         return None, None
 

@@ -100,9 +100,19 @@ class AgentSelector:
             response = self.llm.invoke(messages)
             return response.content if hasattr(response, 'content') else str(response)
         else:
-            full_prompt = f"{system_prompt}\n\n{user_message}"
-            response = self.llm.call(full_prompt)
-            return str(response)
+            import litellm
+            response = litellm.completion(
+                model=self.llm.model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_message},
+                ],
+                temperature=getattr(self.llm, 'temperature', 0.2),
+                api_key=getattr(self.llm, 'api_key', None),
+                base_url=getattr(self.llm, 'base_url', None),
+                max_tokens=500,  # agent assignments: 7 agents × role/goal/backstory ≈ 350 tokens
+            )
+            return response.choices[0].message.content
 
     def _parse_json_array(self, response: str) -> list:
         """Parse JSON array from LLM response."""

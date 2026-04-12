@@ -60,6 +60,36 @@ class MetaAgentOrchestrator:
             print(f"[Meta Agent] Capping MRM subtasks from {len(subtasks['mrm_subtasks'])} to 3")
             subtasks["mrm_subtasks"] = subtasks["mrm_subtasks"][:3]
 
+        # CRITICAL: Ensure model training is always present in modeling subtasks.
+        # When the LLM generates 7 steps and we cap to 4, training (step 5) is dropped.
+        # If training is missing, replace the last slot with a guaranteed training task.
+        modeling_tasks = subtasks.get("modeling_subtasks", [])
+        training_kw = ["train", "classifier", "fit model", "model training", "model evaluation", "evaluat"]
+        has_training = any(
+            any(kw in (st.get("name", "") + " " + st.get("description", "")).lower()
+                for kw in training_kw)
+            for st in modeling_tasks
+        )
+        if not has_training and modeling_tasks:
+            inject_idx = len(modeling_tasks) - 1
+            reuse_id = modeling_tasks[inject_idx]["id"]
+            prev_id = modeling_tasks[inject_idx - 1]["id"] if inject_idx > 0 else None
+            training_task = {
+                "id": reuse_id,
+                "name": "Model Training and Evaluation",
+                "description": (
+                    f"Train a RandomForestClassifier on '{dataset_path}'. "
+                    f"Load data, handle NaN, encode categoricals, drop unnamed index columns. "
+                    f"Identify target column from task: {task_description}. "
+                    f"Split 80/20. Train RandomForestClassifier(n_estimators=100, random_state=42). "
+                    f"Print EXACTLY: Accuracy: X.XXXX, F1 Score: X.XXXX, Precision: X.XXXX, Recall: X.XXXX"
+                ),
+                "depends_on": [prev_id] if prev_id else [],
+            }
+            modeling_tasks[inject_idx] = training_task
+            subtasks["modeling_subtasks"] = modeling_tasks
+            print(f"[Meta Agent] No training task found — injected 'Model Training and Evaluation' at slot {inject_idx}")
+
         # Step 2: Select agents for each subtask
         agent_map = self.agent_selector.select_agents(subtasks)
 
@@ -71,15 +101,46 @@ class MetaAgentOrchestrator:
             subtasks, agent_map, tool_map, dataset_path, task_description
         )
 
-        # Post-process: ensure all code-executing tasks have dataset-specific instructions
+        # Post-process: inject dataset path + target column into every code-executing task.
+        # The LLM often writes generic code like df.drop('target') or df.iloc[:,-1] which
+        # picks the wrong column. We extract the explicit target column from the NL task
+        # description and force it into every instruction that executes code.
+        target_hint = self._extract_target_hint(task_description)
+
         for sid, instr in instructions.items():
             desc = instr.get("task_description", "")
-            # Ensure dataset path is referenced
-            if dataset_path not in desc and any(
-                keyword in sid.lower() for keyword in ["task_0", "task_1", "task_2", "task_3"]
-            ):
-                if "code" in str(tool_map.get(sid, [])) or "execution" in str(tool_map.get(sid, [])):
-                    instr["task_description"] = desc + f"\n\nIMPORTANT: Use the dataset at '{dataset_path}'. Do NOT generate fake data."
+            # Only process tasks that use execute_python_code (not eda_tool-only tasks)
+            tool_list_str = str(tool_map.get(sid, []))
+            has_code_tool = "code_execution" in tool_list_str or "execute_python_code" in tool_list_str
+            if has_code_tool:
+                suffix = ""
+                if dataset_path not in desc:
+                    suffix += f"\n\nIMPORTANT: Load the real dataset from '{dataset_path}'. Do NOT generate fake data."
+                if target_hint and target_hint not in desc:
+                    suffix += f"\n\n{target_hint}"
+                # Inject robust target detection for training/evaluation tasks ONLY.
+                # Do NOT inject X/y splitting code into EDA or data loading tasks — it confuses
+                # the model and causes empty LLM responses.
+                is_eda_or_load = any(kw in desc.lower() for kw in [
+                    "exploratory", "eda", "summary statistics", "data types", "missing values",
+                    "print df.shape", "print(df.shape", "first 5 rows", "df.head()"
+                ])
+                is_training_task = any(kw in desc.lower() for kw in [
+                    "train", "split", "randomforest", "classifier", "model", "evaluat", "stress"
+                ])
+                if not target_hint and "known = " not in desc and "df.columns[-1]" not in desc:
+                    if is_training_task and not is_eda_or_load:
+                        suffix += (
+                            f"\n\nCRITICAL: Do NOT use column names from previous task outputs — "
+                            f"prior agents may have hallucinated renamed columns. "
+                            f"Always detect the target with: "
+                            f"known = {{'SeriousDlqin2yrs', 'Class'}}; "
+                            f"target_col = next((c for c in known if c in df.columns), df.columns[-1]); "
+                            f"X = df.drop(columns=[target_col] + [c for c in df.columns if 'unnamed' in c.lower()]); "
+                            f"y = df[target_col]"
+                        )
+                if suffix:
+                    instr["task_description"] = desc + suffix
 
         # Step 5: Generate the final JSON config
         config = self.json_generator.generate(
@@ -99,6 +160,44 @@ class MetaAgentOrchestrator:
         self._print_summary(config)
 
         return config
+
+    def _extract_target_hint(self, task_description: str) -> str:
+        """
+        Parse the NL task description for an explicit target column name and return
+        a ready-to-inject code hint. Returns empty string if nothing is found.
+
+        Handles patterns like:
+          - "Target column: 'SeriousDlqin2yrs'"
+          - "y = df['SeriousDlqin2yrs']"
+          - "target column is SeriousDlqin2yrs"
+        """
+        import re
+
+        # Try "Target column: 'X'" or 'Target column: "X"'
+        m = re.search(r"[Tt]arget\s+column[:\s]+['\"]?([\w]+)['\"]?", task_description)
+        if m:
+            col = m.group(1)
+            drop_unnamed = "[c for c in df.columns if 'unnamed' in c.lower()]"
+            return (
+                f"TARGET COLUMN IS '{col}' — do NOT use df.iloc[:, -1]. Use:\n"
+                f"  target_col = '{col}'\n"
+                f"  X = df.drop(columns=[target_col] + {drop_unnamed})\n"
+                f"  y = df[target_col]"
+            )
+
+        # Try "y = df['X']" pattern
+        m = re.search(r"y\s*=\s*df\[['\"](\w+)['\"]\]", task_description)
+        if m:
+            col = m.group(1)
+            drop_unnamed = "[c for c in df.columns if 'unnamed' in c.lower()]"
+            return (
+                f"TARGET COLUMN IS '{col}' — do NOT use df.iloc[:, -1]. Use:\n"
+                f"  target_col = '{col}'\n"
+                f"  X = df.drop(columns=[target_col] + {drop_unnamed})\n"
+                f"  y = df[target_col]"
+            )
+
+        return ""
 
     def _print_summary(self, config: dict):
         """Print a readable summary of the generated config."""

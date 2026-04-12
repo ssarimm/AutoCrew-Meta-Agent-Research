@@ -1,5 +1,6 @@
 import sys
 import os
+os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
 from src.config import get_llm, select_llm_interactive
 from src.evaluation.terminal_logger import TerminalLogger
 
@@ -16,16 +17,23 @@ DATASETS = {
     },
     "3": {
         "path": "data/cs-training.csv",
-        "desc": "Predict probability of financial distress (Credit Scoring).",
+        "desc": (
+            "Predict probability of financial distress (Credit Scoring). "
+            "Target column: 'SeriousDlqin2yrs' (binary: 1=distress, 0=no distress). "
+            "Drop 'Unnamed: 0' — it is a row index, not a feature. "
+            "Use X = df.drop(columns=['Unnamed: 0', 'SeriousDlqin2yrs']), y = df['SeriousDlqin2yrs']."
+        ),
     },
 }
 
 # LLM choice names for logging
 LLM_NAMES = {
-    "1": "groq",
+    "1": "groq_llama3.3_70b",
     "2": "gemini",
     "3": "ollama",
     "4": "mock",
+    "5": "groq_llama4_scout",
+    "6": "groq_llama3.1_8b",
 }
 
 
@@ -67,6 +75,12 @@ def main():
         sys.exit()
 
     llm_name = LLM_NAMES.get(llm_choice, "unknown")
+
+    # Show remaining Groq quota at startup (no-op for other providers)
+    if llm_choice in ("1", "5", "6"):
+        from src.utils.groq_limits import show_groq_limits
+        groq_model = getattr(llm, 'model', None)
+        show_groq_limits("Start of run", model=groq_model)
 
     # --- Step 2: Select Dataset ---
     dataset_path, task_desc = select_dataset()

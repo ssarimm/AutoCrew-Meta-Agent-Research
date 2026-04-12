@@ -1,10 +1,9 @@
 """
 AutoCrew PDF Report Generator
-Generates a professional PDF report for FYP presentation.
-Images are read from the figures/ folder.
-Run: python -m src.report_generator
+Focused on Path A (Manual) vs Path B (AutoCrew) comparison.
 """
 import os
+import re
 import json
 from datetime import datetime
 from reportlab.lib.pagesizes import A4
@@ -13,470 +12,527 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch, cm
 from reportlab.platypus import (
     SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
-    PageBreak, Image, Preformatted
+    PageBreak, Image
 )
-from reportlab.lib.enums import TA_CENTER, TA_LEFT
+from reportlab.lib.enums import TA_CENTER
 
-# Path to figures folder (relative to project root)
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 FIGURES_DIR = os.path.join(PROJECT_ROOT, "figures")
 
+# ── Human setup time estimate ──────────────────────────────────────────────────
+# For Path A (Manual), a developer must hand-code every agent definition and task
+# instruction in Python before a single run can happen.  This one-time effort is
+# invisible in wall-clock run timings but is a real cost that AutoCrew eliminates.
+#
+# Estimation breakdown (experienced CrewAI developer):
+#   - 6 agent definitions (role, goal, backstory, tool selection) @ 15 min each → 90 min
+#   - 6 task descriptions (detailed LLM-quality instructions)     @ 20 min each → 120 min
+#   - Tool registry wiring + pipeline integration                              →  30 min
+#   - Testing, debugging, and prompt iteration                                 →  60 min
+#   ─────────────────────────────────────────────────────────────────────────────────────
+#   Total estimate                                                             → 300 min
+#
+HUMAN_SETUP_TIME_SEC = 300 * 60  # 300 minutes = 18 000 s
+HUMAN_SETUP_LABEL    = "~300 min (est.)"  # shown in tables
+
+
 def _get_dataset_display_name(path):
-    """Convert dataset path to a human-readable name."""
     if "creditcard_2023" in path:
-        return "Fraud Detection - Credit Card Transactions (creditcard_2023.csv)"
+        return "Fraud Detection — creditcard_2023.csv"
     elif "cs-training" in path:
-        return "Credit Scoring - Financial Distress Prediction (cs-training.csv)"
+        return "Credit Scoring — cs-training.csv (Give Me Some Credit)"
     elif "credit_card_approval" in path:
-        return "Credit Card Approval Prediction (credit_card_approval.csv)"
-    return path or "data/credit_card_approval.csv"
+        return "Credit Card Approval — credit_card_approval.csv"
+    return path or "Unknown dataset"
+
+
+def _extract_metric(text: str, metric_name: str) -> float:
+    """Extract a numeric metric from output text. Returns -1 if not found."""
+    patterns = [
+        rf"\*\*{re.escape(metric_name)}\*\*\s*[:=]?\s*([\d.]+)",
+        rf"{re.escape(metric_name)}\s*[:=]\s*([\d.]+)",
+        rf"{re.escape(metric_name)}.*?(0\.\d{{2,4}})",
+    ]
+    text_lower = text.lower()
+    for pattern in patterns:
+        match = re.search(pattern, text_lower)
+        if match:
+            try:
+                val = float(match.group(1))
+                if val > 1:
+                    val /= 100.0
+                if 0 < val <= 1:
+                    return round(val, 4)
+            except ValueError:
+                continue
+    return -1.0
+
+
+def _extract_all_metrics(results: dict) -> dict:
+    """Extract ML metrics and timing from a pipeline results dict."""
+    text = results.get("modeling_output", "") or ""
+    return {
+        "accuracy":  _extract_metric(text, "accuracy"),
+        "f1_score":  _extract_metric(text, "f1"),
+        "precision": _extract_metric(text, "precision"),
+        "recall":    _extract_metric(text, "recall"),
+        "meta_agent_time_sec": results.get("meta_agent_time_sec", 0) or 0,
+        "modeling_time_sec":   results.get("modeling_time_sec", 0) or 0,
+        "mrm_time_sec":        results.get("mrm_time_sec", 0) or 0,
+        "total_time_sec":      results.get("total_time_sec", 0) or 0,
+        "mrm_verdict": results.get("mrm_verdict", "N/A"),
+        "mode": results.get("mode", "unknown"),
+    }
+
+
+def _load_latest_metrics_from_file():
+    """Load manual and auto metrics from the most recent results JSON files."""
+    manual, auto = {}, {}
+    results_dir = os.path.join(PROJECT_ROOT, "results")
+    if not os.path.exists(results_dir):
+        return manual, auto
+
+    # Check metrics.json first
+    mfile = os.path.join(results_dir, "metrics.json")
+    if os.path.exists(mfile):
+        with open(mfile) as f:
+            records = json.load(f)
+        for r in sorted(records, key=lambda x: x.get("timestamp", ""), reverse=True):
+            if r.get("mode") == "manual" and not manual:
+                manual = r
+            elif r.get("mode") == "auto" and not auto:
+                auto = r
+            if manual and auto:
+                break
+
+    # Fall back to individual result files
+    if not manual:
+        for fname in sorted(os.listdir(results_dir), reverse=True):
+            if fname.startswith("manual_results") and fname.endswith(".json"):
+                with open(os.path.join(results_dir, fname)) as f:
+                    raw = json.load(f)
+                manual = _extract_all_metrics(raw)
+                manual["mode"] = "manual"
+                break
+    if not auto:
+        for fname in sorted(os.listdir(results_dir), reverse=True):
+            if fname.startswith("auto_results") and fname.endswith(".json"):
+                with open(os.path.join(results_dir, fname)) as f:
+                    raw = json.load(f)
+                auto = _extract_all_metrics(raw)
+                auto["mode"] = "auto"
+                break
+
+    return manual, auto
+
 
 def generate_report(
     mode="auto",
-    config_path=None,
     results=None,
-    output_path="results/AutoCrew_Report.pdf"
+    output_path="results/AutoCrew_Report.pdf",
+    **_,   # absorb legacy config_path= calls without error
 ):
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
-    # Always regenerate charts to match current dataset
-    print("[Report] Generating charts into figures/ ...")
+    # Build metrics for the current run
+    current_metrics = _extract_all_metrics(results) if results else {}
+
+    # Load previous run metrics from file for the other path
+    saved_manual, saved_auto = _load_latest_metrics_from_file()
+
+    if mode == "manual":
+        manual_metrics = current_metrics
+        auto_metrics = saved_auto
+    else:
+        manual_metrics = saved_manual
+        auto_metrics = current_metrics
+
+    dataset_name = (results.get("dataset", "") if results else "") or \
+                   manual_metrics.get("dataset", "") or auto_metrics.get("dataset", "")
+
+    # Generate / update all charts for this run
+    print("[Report] Generating charts...")
+    chart_path = None
+    eda_path = None
+    arch_path = os.path.join(FIGURES_DIR, "architecture.png")
+    pipeline_path = os.path.join(FIGURES_DIR, "pipeline.png")
+    comparison_path = os.path.join(FIGURES_DIR, "comparison.png")
+    crew_path = os.path.join(FIGURES_DIR, "crew_structure.png")
+
     try:
-        from src.evaluation.generate_charts import generate_all
-        ds = results.get("dataset", "") if results else ""
-        generate_all(dataset_name=ds)
+        from src.evaluation.generate_charts import (
+            generate_model_comparison_chart,
+            generate_eda_plots,
+            generate_architecture,
+            generate_pipeline,
+            generate_comparison,
+            generate_crew_structure,
+        )
+        chart_path = generate_model_comparison_chart(
+            manual_metrics if manual_metrics else None,
+            auto_metrics if auto_metrics else None,
+        )
+        generate_eda_plots(dataset_name)
+        eda_path = os.path.join(FIGURES_DIR, "eda_plots.png")
+        generate_architecture()
+        generate_pipeline()
+        generate_comparison()
+        generate_crew_structure()
     except Exception as e:
         print(f"[Report] Chart generation failed: {e}")
+        # Fall back to whatever already exists on disk
+        eda_path = os.path.join(FIGURES_DIR, "eda_plots.png") if os.path.exists(os.path.join(FIGURES_DIR, "eda_plots.png")) else None
 
+    # ── PDF setup ──────────────────────────────────────────────────────────────
     doc = SimpleDocTemplate(
         output_path, pagesize=A4,
-        rightMargin=1.5*cm, leftMargin=1.5*cm,
-        topMargin=2*cm, bottomMargin=2*cm,
+        rightMargin=1.5 * cm, leftMargin=1.5 * cm,
+        topMargin=2 * cm, bottomMargin=2 * cm,
     )
-
     styles = getSampleStyleSheet()
 
-    styles.add(ParagraphStyle(
-        name='MainTitle', parent=styles['Title'],
-        fontSize=22, spaceAfter=6, textColor=colors.HexColor("#1a1a2e"),
-    ))
-    styles.add(ParagraphStyle(
-        name='SubTitle', parent=styles['Normal'],
-        fontSize=12, alignment=TA_CENTER,
-        textColor=colors.HexColor("#666666"), spaceAfter=20,
-    ))
-    styles.add(ParagraphStyle(
-        name='SectionHead', parent=styles['Heading1'],
-        fontSize=16, textColor=colors.HexColor("#16213e"),
-        spaceBefore=20, spaceAfter=10,
-        borderWidth=1, borderColor=colors.HexColor("#0f3460"), borderPadding=5,
-    ))
-    styles.add(ParagraphStyle(
-        name='SubSection', parent=styles['Heading2'],
-        fontSize=13, textColor=colors.HexColor("#0f3460"),
-        spaceBefore=14, spaceAfter=8,
-    ))
-    styles.add(ParagraphStyle(
-        name='BodyText2', parent=styles['Normal'],
-        fontSize=10, leading=14, spaceAfter=8,
-    ))
-    styles.add(ParagraphStyle(
-        name='CodeStyle', parent=styles['Code'],
-        fontSize=7.5, leading=10,
-        backColor=colors.HexColor("#f4f4f4"),
-        borderWidth=0.5, borderColor=colors.HexColor("#cccccc"), borderPadding=6,
-    ))
-    styles.add(ParagraphStyle(
-        name='CaptionStyle', parent=styles['Normal'],
+    styles.add(ParagraphStyle("MainTitle", parent=styles["Title"],
+        fontSize=20, spaceAfter=6, textColor=colors.HexColor("#1a1a2e")))
+    styles.add(ParagraphStyle("SubTitle", parent=styles["Normal"],
+        fontSize=11, alignment=TA_CENTER,
+        textColor=colors.HexColor("#666666"), spaceAfter=16))
+    styles.add(ParagraphStyle("SectionHead", parent=styles["Heading1"],
+        fontSize=14, textColor=colors.HexColor("#16213e"),
+        spaceBefore=18, spaceAfter=8,
+        borderWidth=1, borderColor=colors.HexColor("#0f3460"), borderPadding=4))
+    styles.add(ParagraphStyle("BodyText2", parent=styles["Normal"],
+        fontSize=10, leading=14, spaceAfter=6))
+    styles.add(ParagraphStyle("Caption", parent=styles["Normal"],
         fontSize=9, alignment=TA_CENTER,
-        textColor=colors.HexColor("#888888"), spaceAfter=12,
-    ))
+        textColor=colors.HexColor("#888888"), spaceAfter=10))
+    styles.add(ParagraphStyle("VerdictApproved", parent=styles["Normal"],
+        fontSize=11, textColor=colors.HexColor("#276749"), spaceAfter=4))
+    styles.add(ParagraphStyle("VerdictRejected", parent=styles["Normal"],
+        fontSize=11, textColor=colors.HexColor("#c53030"), spaceAfter=4))
 
     story = []
-
-    def add_figure(filename, width_cm=16, height_cm=10, caption=None):
-        """Helper to add a figure from figures/ folder."""
-        path = os.path.join(FIGURES_DIR, filename)
-        if os.path.exists(path):
-            story.append(Spacer(1, 0.15*inch))
-            story.append(Image(path, width=width_cm*cm, height=height_cm*cm))
-            if caption:
-                story.append(Paragraph(caption, styles['CaptionStyle']))
-            return True
-        else:
-            story.append(Paragraph(
-                f"<i>[Figure not found: {filename}. Run: python -m src.evaluation.generate_charts]</i>",
-                styles['BodyText2']
-            ))
-            return False
 
     def make_table(data, widths, header_color="#16213e"):
         t = Table(data, colWidths=widths)
         t.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor(header_color)),
-            ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
-            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, -1), 9),
-            ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#cccccc")),
-            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
-            ('TOPPADDING', (0, 0), (-1, -1), 6),
-            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor("#f8f9fa")]),
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(header_color)),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 9),
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#cccccc")),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+            ("TOPPADDING", (0, 0), (-1, -1), 6),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1),
+             [colors.white, colors.HexColor("#f8f9fa")]),
         ]))
         return t
 
-    # ==================== COVER PAGE ====================
-    story.append(Spacer(1, 2*inch))
-    story.append(Paragraph("AutoCrew", styles['MainTitle']))
-    story.append(Paragraph(
-        "Automatic Generation of Agentic AI Crews<br/>for Financial Modeling Tasks",
-        styles['SubTitle']
-    ))
-    story.append(Spacer(1, 0.5*inch))
-    story.append(Paragraph(
-        f"Execution Report &mdash; {datetime.now().strftime('%B %d, %Y')}", styles['SubTitle']
-    ))
-    story.append(Paragraph(
-        f"Mode: <b>{'AutoCrew (Meta Agent)' if mode == 'auto' else 'Manual Pipeline'}</b>",
-        styles['SubTitle']
-    ))
-    story.append(Spacer(1, 0.5*inch))
+    def fmt_metric(v):
+        """Format a metric value or return N/A."""
+        try:
+            f = float(v)
+            return f"{f:.4f}" if f >= 0 else "N/A"
+        except (TypeError, ValueError):
+            return "N/A"
 
-    info_data = [
-        ["Project", "AutoCrew - Final Year Project (BSCS)"],
-        ["University", "FAST National University, Karachi"],
-        ["Department", "Department of Computer Science"],
-        ["Base Paper", "Agentic AI for Model Development & MRM (Okpala et al., 2025)"],
-        ["Framework", "CrewAI + LangChain + LiteLLM"],
-        ["LLM Provider", "Groq (Llama 3.3 70B) / Google Gemini / Ollama"],
-        ["Dataset", _get_dataset_display_name(results.get("dataset", "") if results else "")],
+    def fmt_time(v):
+        try:
+            f = float(v)
+            return f"{f:.1f}s" if f > 0 else "—"
+        except (TypeError, ValueError):
+            return "—"
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # PAGE 1: COVER
+    # ══════════════════════════════════════════════════════════════════════════
+    story.append(Spacer(1, 1.5 * inch))
+    story.append(Paragraph("AutoCrew", styles["MainTitle"]))
+    story.append(Paragraph(
+        "Path A (Manual) vs Path B (AutoCrew) — Comparison Report",
+        styles["SubTitle"]))
+    story.append(Spacer(1, 0.3 * inch))
+    story.append(Paragraph(
+        f"Generated: {datetime.now().strftime('%B %d, %Y  %H:%M')}",
+        styles["SubTitle"]))
+    story.append(Paragraph(
+        f"Dataset: <b>{_get_dataset_display_name(dataset_name)}</b>",
+        styles["SubTitle"]))
+    story.append(Spacer(1, 0.4 * inch))
+
+    cover_data = [
+        ["Path", "Method", "Status"],
+        ["Path A — Manual", "Hardcoded agents/tasks (base paper)",
+         "Metrics loaded" if any(v > 0 for v in [manual_metrics.get("accuracy", -1)]) else "No data"],
+        ["Path B — AutoCrew", "Meta Agent auto-generates crew from NL",
+         "Metrics loaded" if any(v > 0 for v in [auto_metrics.get("accuracy", -1)]) else "No data"],
     ]
-    it = Table(info_data, colWidths=[3.5*cm, 13*cm])
-    it.setStyle(TableStyle([
-        ('FONTNAME', (0, 0), (0, -1), 'Helvetica-Bold'),
-        ('FONTSIZE', (0, 0), (-1, -1), 9),
-        ('TEXTCOLOR', (0, 0), (0, -1), colors.HexColor("#0f3460")),
-        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
-        ('TOPPADDING', (0, 0), (-1, -1), 6),
-        ('LINEBELOW', (0, 0), (-1, -2), 0.3, colors.HexColor("#e0e0e0")),
-    ]))
-    story.append(it)
+    story.append(make_table(cover_data, [3.5 * cm, 9 * cm, 4 * cm], "#1a1a2e"))
     story.append(PageBreak())
 
-    # ==================== TOC ====================
-    story.append(Paragraph("Table of Contents", styles['SectionHead']))
-    toc = [
-        "1. Project Overview",
-        "2. System Architecture",
-        "3. Meta Agent Pipeline",
-        "4. Generated Crew Configuration (JSON)",
-        "5. Crew Structure Visualization",
-        "6. EDA Visualizations",
-        "7. Execution Results",
-        "8. Manual vs AutoCrew Comparison",
-        "9. Code Structure",
-        "10. Conclusion & Future Work",
+    # ══════════════════════════════════════════════════════════════════════════
+    # PAGE 2: MODEL PERFORMANCE COMPARISON  (KEY PAGE)
+    # ══════════════════════════════════════════════════════════════════════════
+    story.append(Paragraph("1. Model Performance Comparison", styles["SectionHead"]))
+    story.append(Paragraph(
+        "Both paths train a <b>Random Forest Classifier</b> on the same dataset. "
+        "The table below shows the test-set metrics for each path.",
+        styles["BodyText2"]))
+
+    perf_data = [
+        ["Metric", "Path A: Manual", "Path B: AutoCrew", "Difference"],
     ]
-    for item in toc:
-        story.append(Paragraph(item, styles['BodyText2']))
+    for label, key in [("Accuracy", "accuracy"), ("F1 Score", "f1_score"),
+                       ("Precision", "precision"), ("Recall", "recall")]:
+        mv = manual_metrics.get(key, -1)
+        av = auto_metrics.get(key, -1)
+        if mv is not None and mv < 0:
+            mv = -1
+        if av is not None and av < 0:
+            av = -1
+        mv_f = float(mv) if mv not in (None, -1) else None
+        av_f = float(av) if av not in (None, -1) else None
+        if mv_f is not None and av_f is not None:
+            diff = f"{av_f - mv_f:+.4f}"
+        else:
+            diff = "N/A"
+        perf_data.append([label, fmt_metric(mv), fmt_metric(av), diff])
+
+    t = make_table(perf_data, [3.5 * cm, 4.5 * cm, 4.5 * cm, 4 * cm], "#0f3460")
+    # Highlight difference column
+    for row_idx in range(1, len(perf_data)):
+        diff_val = perf_data[row_idx][3]
+        if diff_val.startswith("+") and diff_val != "N/A":
+            t.setStyle(TableStyle([
+                ("TEXTCOLOR", (3, row_idx), (3, row_idx), colors.HexColor("#276749")),
+                ("FONTNAME", (3, row_idx), (3, row_idx), "Helvetica-Bold"),
+            ]))
+        elif diff_val.startswith("-"):
+            t.setStyle(TableStyle([
+                ("TEXTCOLOR", (3, row_idx), (3, row_idx), colors.HexColor("#c53030")),
+                ("FONTNAME", (3, row_idx), (3, row_idx), "Helvetica-Bold"),
+            ]))
+    story.append(t)
+    story.append(Spacer(1, 0.2 * inch))
+
+    # Embed the comparison bar chart
+    if chart_path and os.path.exists(chart_path):
+        story.append(Image(chart_path, width=16 * cm, height=7 * cm))
+        story.append(Paragraph(
+            "Figure 1: Model performance scores and execution time — Manual vs AutoCrew",
+            styles["Caption"]))
     story.append(PageBreak())
 
-    # ==================== 1. OVERVIEW ====================
-    story.append(Paragraph("1. Project Overview", styles['SectionHead']))
+    # ══════════════════════════════════════════════════════════════════════════
+    # PAGE: DATASET ANALYSIS (EDA)
+    # ══════════════════════════════════════════════════════════════════════════
+    story.append(Paragraph("2. Dataset Analysis", styles["SectionHead"]))
     story.append(Paragraph(
-        "AutoCrew is an R&amp;D extension of the paper "
-        "<i>\"Agentic AI Systems for Financial Services\"</i> by Okpala et al. (arXiv:2502.05439, 2025). "
-        "The base paper manually codes AI agent crews. AutoCrew introduces a <b>Meta Agent</b> that "
-        "automatically generates crew configurations from natural language, eliminating hardcoded definitions.",
-        styles['BodyText2']
-    ))
-    story.append(Paragraph(
-        "The system takes a task like <i>\"Predict credit approval\"</i> and autonomously: "
-        "(1) decomposes it into subtasks, (2) selects agent roles, (3) assigns tools, "
-        "(4) writes instructions, and (5) generates a complete JSON configuration.",
-        styles['BodyText2']
-    ))
-
-    story.append(Paragraph("1.1 Key Contributions", styles['SubSection']))
-    story.append(make_table([
-        ["#", "Contribution", "Description"],
-        ["1", "Meta Agent", "LLM-powered 5-step orchestrator for crew creation"],
-        ["2", "JSON Config", "Structured crew_config.json from NL input"],
-        ["3", "Crew Factory", "JSON parser that builds live CrewAI objects"],
-        ["4", "Dual-Path", "Manual vs Auto for fair comparison"],
-        ["5", "Tool Registry", "Extensible string-to-tool mapping"],
-        ["6", "Evaluation", "Side-by-side metrics (accuracy, F1, timing)"],
-    ], [0.8*cm, 2.5*cm, 13.7*cm]))
-    story.append(PageBreak())
-
-    # ==================== 2. ARCHITECTURE ====================
-    story.append(Paragraph("2. System Architecture", styles['SectionHead']))
-    story.append(Paragraph(
-        "AutoCrew uses a dual-path architecture. <b>Path A</b> (Manual) preserves the base paper. "
-        "<b>Path B</b> (AutoCrew) uses the Meta Agent. Both share tools, HITL gate, and CrewAI engine.",
-        styles['BodyText2']
-    ))
-    add_figure("architecture.png", 16, 9.3, "Figure 1: AutoCrew dual-path system architecture")
-
-    story.append(make_table([
-        ["Component", "Path A (Manual)", "Path B (AutoCrew)"],
-        ["Agent Definition", "Hardcoded in Python", "Generated by LLM"],
-        ["Task Definition", "Hardcoded in Python", "Generated from NL"],
-        ["Tool Assignment", "Manual in code", "LLM selects from registry"],
-        ["Configuration", "Python classes", "JSON config file"],
-        ["Adaptability", "Requires code changes", "Just change the prompt"],
-        ["Execution", "CrewAI", "CrewAI (identical)"],
-    ], [4*cm, 5.5*cm, 7.5*cm], "#0f3460"))
-    story.append(PageBreak())
-
-    # ==================== 3. PIPELINE ====================
-    story.append(Paragraph("3. Meta Agent Pipeline", styles['SectionHead']))
-    story.append(Paragraph(
-        "The Meta Agent operates as a <b>5-step pipeline</b>. Each step makes a structured LLM call "
-        "with JSON output. If LLM fails, a rule-based fallback produces valid configuration.",
-        styles['BodyText2']
-    ))
-    add_figure("pipeline.png", 16, 4.7, "Figure 2: Meta Agent 5-step pipeline")
-
-    story.append(make_table([
-        ["Step", "Module", "Input", "Output", "Time"],
-        ["1", "Task Decomposer", "NL task description", "Subtask list", "~1s"],
-        ["2", "Agent Selector", "Subtask list", "Role + persona", "~1s"],
-        ["3", "Tool Assigner", "Agents + catalog", "Tool names", "~1s"],
-        ["4", "Instruction Writer", "Full context", "Descriptions", "~2s"],
-        ["5", "JSON Generator", "All above", "crew_config.json", "<1s"],
-    ], [0.8*cm, 2.8*cm, 3.5*cm, 3.5*cm, 1.2*cm], "#533483"))
-    story.append(Paragraph(
-        "<b>Total: ~6 seconds</b> on Groq. This replaces hours of manual Python coding.",
-        styles['BodyText2']
-    ))
-    story.append(PageBreak())
-
-    # ==================== 4. JSON CONFIG ====================
-    story.append(Paragraph("4. Generated JSON Configuration", styles['SectionHead']))
-
-    config_data = None
-    if config_path and os.path.exists(config_path):
-        with open(config_path, "r") as f:
-            config_data = json.load(f)
+        f"Exploratory data analysis of <b>{_get_dataset_display_name(dataset_name)}</b>. "
+        "Charts show feature distributions, class balance, and key statistics. "
+        "Both paths train on the same unmodified dataset.",
+        styles["BodyText2"]))
+    if eda_path and os.path.exists(eda_path):
+        story.append(Spacer(1, 0.1 * inch))
+        story.append(Image(eda_path, width=16 * cm, height=9.5 * cm))
+        story.append(Paragraph(
+            "Figure 2: EDA — feature distributions and class balance",
+            styles["Caption"]))
     else:
-        config_dir = os.path.join(PROJECT_ROOT, "configs", "generated")
-        if os.path.exists(config_dir):
-            files = sorted([f for f in os.listdir(config_dir) if f.endswith(".json")])
-            if files:
-                cp = os.path.join(config_dir, files[-1])
-                with open(cp, "r") as f:
-                    config_data = json.load(f)
-                story.append(Paragraph(f"Config: <font color='blue'>{cp}</font>", styles['BodyText2']))
+        story.append(Paragraph("<i>EDA chart not available.</i>", styles["BodyText2"]))
+    story.append(PageBreak())
 
-    if config_data:
-        json_text = json.dumps(config_data, indent=2, ensure_ascii=False)
-        if len(json_text) > 4000:
-            json_text = json_text[:4000] + "\n... [truncated]"
-        story.append(Preformatted(json_text, styles['CodeStyle']))
+    # ══════════════════════════════════════════════════════════════════════════
+    # AGENT-GENERATED PLOTS (inserted if any exist)
+    # ══════════════════════════════════════════════════════════════════════════
+    agent_plots_dir = os.path.join(PROJECT_ROOT, "figures", "agent_plots")
+    agent_plot_files = []
+    if os.path.exists(agent_plots_dir):
+        agent_plot_files = sorted([
+            os.path.join(agent_plots_dir, f)
+            for f in os.listdir(agent_plots_dir)
+            if f.endswith(".png")
+        ])
+
+    if agent_plot_files:
+        story.append(Paragraph("3. Agent-Generated Plots", styles["SectionHead"]))
+        story.append(Paragraph(
+            "The following charts were automatically generated by agents during code execution.",
+            styles["BodyText2"]))
+
+        for i, plot_path in enumerate(agent_plot_files):
+            # Derive a human-readable label from the filename:
+            # format is  <timestamp>_<sanitised_title>.png
+            fname = os.path.basename(plot_path).replace(".png", "")
+            parts = fname.split("_", 1)          # split off timestamp
+            raw_label = parts[1] if len(parts) > 1 else fname
+            label = raw_label.replace("_", " ").strip().title() or f"Plot {i + 1}"
+
+            try:
+                # Fit each plot to the page width; preserve aspect ratio
+                from PIL import Image as PILImage
+                with PILImage.open(plot_path) as img:
+                    w_px, h_px = img.size
+                max_w = 15 * cm
+                aspect = h_px / w_px
+                img_w = max_w
+                img_h = min(max_w * aspect, 10 * cm)
+            except Exception:
+                img_w, img_h = 15 * cm, 9 * cm
+
+            story.append(Spacer(1, 0.15 * inch))
+            story.append(Image(plot_path, width=img_w, height=img_h))
+            story.append(Paragraph(
+                f"Figure {3 + i}: {label}",
+                styles["Caption"]))
 
         story.append(PageBreak())
-        story.append(Paragraph("4.1 Generated Agents Summary", styles['SubSection']))
-        for crew_name in ["modeling_crew", "mrm_crew"]:
-            crew = config_data.get(crew_name, {})
-            agents = crew.get("agents", [])
-            if agents:
-                label = crew_name.replace("_", " ").title()
-                story.append(Paragraph(f"<b>{label}</b>", styles['BodyText2']))
-                rows = [["#", "Role", "Goal", "Tools"]]
-                for i, a in enumerate(agents):
-                    tools = ", ".join(a.get("tools", [])) or "None"
-                    rows.append([str(i+1), a.get("role", ""), a.get("goal", "")[:60], tools])
-                story.append(make_table(rows, [0.8*cm, 3.5*cm, 7.5*cm, 5.2*cm], "#2c3e50"))
-                story.append(Spacer(1, 0.2*inch))
-    else:
-        story.append(Paragraph("No config found. Run the pipeline first.", styles['BodyText2']))
-    story.append(PageBreak())
 
-    # ==================== 5. CREW STRUCTURE ====================
-    story.append(Paragraph("5. Crew Structure Visualization", styles['SectionHead']))
+    # ══════════════════════════════════════════════════════════════════════════
+    # PAGE 3: EXECUTION TIMING
+    # ══════════════════════════════════════════════════════════════════════════
+    story.append(Paragraph("4. Execution Time Comparison", styles["SectionHead"]))
     story.append(Paragraph(
-        "The Meta Agent automatically determined the crew composition. "
-        "Each agent was assigned tools from the centralized tool registry.",
-        styles['BodyText2']
-    ))
-    add_figure("crew_structure.png", 16, 5.8, "Figure 3: Auto-generated crew structure with tool assignments")
+        "Wall-clock run time is measured automatically. "
+        "Path A also incurs a one-time <b>human setup cost</b> — the engineering effort "
+        "required to hand-code every agent definition, task instruction, and tool "
+        "assignment before the pipeline can execute. "
+        "Path B eliminates this cost entirely: the Meta Agent generates the full crew "
+        "configuration from a single natural-language sentence.",
+        styles["BodyText2"]))
+    story.append(Spacer(1, 0.1 * inch))
 
-    story.append(make_table([
-        ["Tool", "Purpose", "Used By"],
-        ["code_execution", "Runs Python scripts (pandas, sklearn)", "Analyst, Sr.DS, ML Eng, Stress Tester"],
-        ["eda_tool", "Automated EDA with labeled plots", "Data Scientist"],
-        ["cag_tool", "Compliance checking vs guidelines", "Compliance Officer"],
-    ], [3*cm, 7*cm, 7*cm]))
-    story.append(PageBreak())
+    manual_total = manual_metrics.get("total_time_sec", 0) or 0
+    auto_total   = auto_metrics.get("total_time_sec", 0) or 0
 
-    # ==================== 6. EDA ====================
-    story.append(Paragraph("6. EDA Visualizations", styles['SectionHead']))
-    dataset_name = results.get("dataset", "dataset") if results else "dataset"
-    story.append(Paragraph(
-        f"The EDA tool generates labeled plots for all dataset columns. "
-        f"Dataset used: <b>{dataset_name}</b>. "
-        f"Plots below are generated from the dataset's statistical profile.",
-        styles['BodyText2']
-    ))
-    add_figure("eda_plots.png", 16, 9.5, "Figure 4: EDA plots with distributions, value counts, and class balance")
+    def fmt_total_with_setup(run_sec):
+        """Show run time + human setup as a combined total."""
+        if run_sec <= 0:
+            return f"— + {HUMAN_SETUP_LABEL}"
+        combined_min = (run_sec + HUMAN_SETUP_TIME_SEC) / 60
+        return f"{fmt_time(run_sec)} + {HUMAN_SETUP_LABEL}\n= ~{combined_min:.0f} min total"
 
-    # Dataset-specific statistics table
-    ds_name = results.get("dataset", "") if results else ""
-    if "creditcard_2023" in ds_name:
-        story.append(make_table([
-            ["Statistic", "V1 (PCA)", "V2 (PCA)", "V14 (PCA)", "Amount"],
-            ["Mean", "0.000", "0.000", "0.000", "88.35"],
-            ["Std Dev", "1.959", "1.651", "1.767", "250.12"],
-            ["Min", "-56.41", "-72.72", "-19.21", "0.00"],
-            ["Max", "2.45", "22.06", "10.53", "25,691"],
-        ], [2.4*cm, 2.4*cm, 2.4*cm, 2.4*cm, 2.4*cm]))
-    elif "cs-training" in ds_name:
-        story.append(make_table([
-            ["Statistic", "Revol. Util.", "Age", "Debt Ratio", "Monthly Income"],
-            ["Mean", "6.05", "52.3", "353.0", "6,670"],
-            ["Std Dev", "249.8", "14.8", "2,038", "14,384"],
-            ["Min", "0.000", "21", "0", "0"],
-            ["Max", "50,708", "109", "329,664", "3,008,750"],
-        ], [2.4*cm, 2.4*cm, 2.4*cm, 2.4*cm, 2.4*cm]))
-    else:
-        story.append(make_table([
-            ["Statistic", "Age", "Debt Ratio", "Years Employed", "Income"],
-            ["Mean", "4.766", "2.225", "2.402", "1018.9"],
-            ["Std Dev", "4.978", "3.349", "4.866", "5213.7"],
-            ["Min", "0.000", "0.000", "0", "0"],
-            ["Max", "28.000", "28.500", "67", "100,000"],
-        ], [2.4*cm, 2.4*cm, 2.4*cm, 2.4*cm, 2.4*cm]))
-    story.append(PageBreak())
-
-    # ==================== 7. RESULTS ====================
-    story.append(Paragraph("7. Execution Results", styles['SectionHead']))
-
-    if results:
-        story.append(Paragraph(f"<b>Mode:</b> {results.get('mode', 'N/A')}", styles['BodyText2']))
-        story.append(Paragraph(f"<b>Dataset:</b> {results.get('dataset', 'N/A')}", styles['BodyText2']))
-        story.append(Paragraph(f"<b>Task:</b> {results.get('task', 'N/A')}", styles['BodyText2']))
-
-        timing = [["Phase", "Time (seconds)"]]
-        for key, label in [("meta_agent_time_sec", "Meta Agent"), ("modeling_time_sec", "Modeling"), ("mrm_time_sec", "MRM"), ("total_time_sec", "Total")]:
-            if results.get(key):
-                timing.append([label, str(results[key])])
-        if len(timing) > 1:
-            story.append(make_table(timing, [6*cm, 5*cm], "#27ae60"))
-
-        # Show modeling output
-        modeling_output = results.get("modeling_output", "")
-        if modeling_output and "rate_limit" not in modeling_output.lower():
-            story.append(Paragraph("7.1 Modeling Output (Terminal Log)", styles['SubSection']))
-            output_text = str(modeling_output)
-            if len(output_text) > 5000:
-                output_text = output_text[:5000] + "\n\n... [truncated — full output was " + str(len(str(modeling_output))) + " chars]"
-            story.append(Preformatted(output_text, styles['CodeStyle']))
-
-        # Show MRM verdict
-        verdict = results.get("mrm_verdict", "")
-        if verdict and "rate_limit" not in verdict.lower():
-            story.append(Paragraph("7.2 MRM Verdict", styles['SubSection']))
-            verdict_text = str(verdict)
-            if len(verdict_text) > 3000:
-                verdict_text = verdict_text[:3000] + "\n\n... [truncated]"
-            story.append(Preformatted(verdict_text, styles['CodeStyle']))
-    else:
-        story.append(Paragraph("No results available. Run the pipeline first.", styles['BodyText2']))
-    story.append(PageBreak())
-
-    # ==================== 8. COMPARISON ====================
-    story.append(Paragraph("8. Manual vs AutoCrew Comparison", styles['SectionHead']))
-    add_figure("comparison.png", 16, 6.6, "Figure 5: Automation level and execution time comparison")
-
-    story.append(make_table([
-        ["Dimension", "Manual (Base Paper)", "AutoCrew (Meta Agent)"],
-        ["Setup Method", "Write Python classes", "Provide NL description"],
-        ["Time to Configure", "Hours (per task)", "~6 seconds"],
-        ["Agent Count", "3+3 = 6 (fixed)", "Dynamic (LLM decides)"],
-        ["Tool Assignment", "Hardcoded", "Auto from registry"],
-        ["New Task", "Rewrite Python", "Change one sentence"],
-        ["JSON Config", "Not generated", "Saved to file"],
-        ["Developer Skill", "Python + CrewAI", "Describe task in English"],
-    ], [3.5*cm, 6.5*cm, 7*cm], "#8e44ad"))
-    story.append(PageBreak())
-
-    # ==================== 9. CODE STRUCTURE ====================
-    story.append(Paragraph("9. Code Structure", styles['SectionHead']))
-    files = [
-        "AutoCrew/",
-        "  src/main.py .................. Entry point (manual/auto/compare)",
-        "  src/config.py ................ LLM provider setup",
-        "  src/meta_agent/",
-        "    orchestrator.py ............ Chains 5 pipeline steps",
-        "    task_decomposer.py ......... NL -> subtasks",
-        "    agent_selector.py .......... Subtask -> agent",
-        "    tool_assigner.py ........... Agent -> tools",
-        "    instruction_writer.py ...... Generate instructions",
-        "    json_generator.py .......... Assemble JSON",
-        "  src/crew_factory/",
-        "    crew_builder.py ............ JSON -> live CrewAI",
-        "    auto_runner.py ............. Auto pipeline runner",
-        "  src/manual/ .................. Base paper (Path A)",
-        "  src/tools/ ................... Shared tools",
-        "  src/evaluation/ .............. Comparison framework",
-        "  src/evaluation/generate_charts.py .. Chart generator",
-        "  src/evaluation/report_generator.py . This PDF generator",
-        "  figures/ ..................... Generated charts (PNG)",
-        "  configs/generated/ ........... Auto-saved JSON configs",
+    timing_data = [
+        ["Phase", "Path A: Manual", "Path B: AutoCrew", "Notes"],
+        ["Human Setup\n(one-time, estimated)",
+         HUMAN_SETUP_LABEL,
+         "~6 s (automated)",
+         "Write agent defs, task instructions,\ntool assignments, debug & iterate"],
+        ["Meta Agent Config", "—",
+         fmt_time(auto_metrics.get("meta_agent_time_sec")),
+         "LLM crew generation (AutoCrew only)"],
+        ["Modeling Crew",
+         fmt_time(manual_metrics.get("modeling_time_sec")),
+         fmt_time(auto_metrics.get("modeling_time_sec")),
+         "Train model + write model card"],
+        ["MRM Crew",
+         fmt_time(manual_metrics.get("mrm_time_sec")),
+         fmt_time(auto_metrics.get("mrm_time_sec")),
+         "Compliance, stress test, verdict"],
+        ["Run Time Total",
+         fmt_time(manual_total),
+         fmt_time(auto_total),
+         "Automated wall-clock time only"],
+        ["Total incl.\nHuman Setup",
+         fmt_total_with_setup(manual_total),
+         fmt_time(auto_total),
+         "Full cost: human effort + run time"],
     ]
-    for line in files:
-        story.append(Preformatted(line, styles['CodeStyle']))
+    t = make_table(timing_data, [3.5 * cm, 4 * cm, 3.5 * cm, 5.5 * cm], "#27ae60")
+    # Highlight the "Total incl. Human Setup" row
+    last_row = len(timing_data) - 1
+    t.setStyle(TableStyle([
+        ("FONTNAME", (0, last_row), (-1, last_row), "Helvetica-Bold"),
+        ("BACKGROUND", (0, last_row), (-1, last_row), colors.HexColor("#e8f5e9")),
+        ("TEXTCOLOR", (1, last_row), (1, last_row), colors.HexColor("#c53030")),  # Manual cost in red
+        ("TEXTCOLOR", (2, last_row), (2, last_row), colors.HexColor("#276749")),  # AutoCrew cost in green
+    ]))
+    # Highlight the human setup row
+    t.setStyle(TableStyle([
+        ("BACKGROUND", (0, 1), (-1, 1), colors.HexColor("#fff3e0")),
+    ]))
+    story.append(t)
+    story.append(Spacer(1, 0.1 * inch))
+    story.append(Paragraph(
+        "<i>Human setup time estimate: 6 agents × 15 min (definition) + "
+        "6 tasks × 20 min (instructions) + 30 min (integration) + "
+        "60 min (testing/debugging) = 300 min. "
+        "Assumes an experienced CrewAI developer. "
+        "AutoCrew reduces this to the ~6 s Meta Agent config phase.</i>",
+        styles["Caption"]))
     story.append(PageBreak())
 
-    # ==================== 10. CONCLUSION ====================
-    story.append(Paragraph("10. Conclusion & Future Work", styles['SectionHead']))
-    story.append(Paragraph(
-        "AutoCrew demonstrates that a Meta Agent can automate multi-agent crew creation "
-        "for financial modeling. Key achievements:", styles['BodyText2']
-    ))
-    for c in [
-        "Reduced developer effort: no code changes for new tasks",
-        "Dynamic crew sizing: Meta Agent decides agent count",
-        "Structured output: JSON configs are reusable and versionable",
-        "Graceful degradation: rule-based fallbacks when LLM fails",
-        "Built-in evaluation: side-by-side comparison framework",
-    ]:
-        story.append(Paragraph(f"&bull; {c}", styles['BodyText2']))
+    # ══════════════════════════════════════════════════════════════════════════
+    # PAGE 4: MRM VERDICTS + CREW COMPARISON
+    # ══════════════════════════════════════════════════════════════════════════
+    story.append(Paragraph("5. MRM Audit Verdicts", styles["SectionHead"]))
 
-    story.append(Paragraph("<b>Future Work:</b>", styles['SubSection']))
-    for f in [
-        "Hierarchical crew structures (manager delegation)",
-        "Vector DB integration for CAG (semantic compliance)",
-        "Web UI for non-technical users",
-        "More LLM providers (Claude, GPT-4)",
-        "Agent memory across runs",
-        "MLflow integration for experiment tracking",
-    ]:
-        story.append(Paragraph(f"&bull; {f}", styles['BodyText2']))
+    for path_label, m in [("Path A: Manual", manual_metrics),
+                           ("Path B: AutoCrew", auto_metrics)]:
+        verdict = str(m.get("mrm_verdict", "N/A"))
+        style = styles["VerdictApproved"] if "approved" in verdict.lower() else styles["VerdictRejected"]
+        story.append(Paragraph(f"<b>{path_label}:</b>  {verdict[:300]}", style))
+
+    story.append(Spacer(1, 0.2 * inch))
+    story.append(Paragraph("6. Architecture Comparison", styles["SectionHead"]))
+    story.append(make_table([
+        ["Dimension", "Path A: Manual", "Path B: AutoCrew"],
+        ["Agent definition", "Hardcoded in Python", "Generated by Meta Agent LLM"],
+        ["Task instructions", "Hardcoded in Python", "Generated from natural language"],
+        ["Tool assignment", "Manual in code", "Auto-selected from registry"],
+        ["To add a new task", "Rewrite Python classes", "Change one sentence"],
+        ["Configuration saved?", "No", "Yes — crew_config.json"],
+        ["Crew size", "3 + 3 (fixed)", "Dynamic (LLM decides)"],
+        ["Setup time", "~300 min (hardcoding)", "~6 seconds (LLM call)"],
+    ], [4.5 * cm, 6 * cm, 6 * cm], "#8e44ad"))
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # PAGE: SYSTEM DIAGRAMS
+    # ══════════════════════════════════════════════════════════════════════════
+    story.append(PageBreak())
+    story.append(Paragraph("7. System Diagrams", styles["SectionHead"]))
+
+    def _embed_figure(path, caption, fig_num, w=16*cm, h=8*cm):
+        if path and os.path.exists(path):
+            story.append(Image(path, width=w, height=h))
+            story.append(Paragraph(f"Figure {fig_num}: {caption}", styles["Caption"]))
+            story.append(Spacer(1, 0.15 * inch))
+
+    # Architecture overview
+    story.append(Paragraph(
+        "The diagrams below show the AutoCrew system architecture, the Meta Agent 5-step "
+        "pipeline, the auto-generated crew structure, and the automation level comparison.",
+        styles["BodyText2"]))
+    story.append(Spacer(1, 0.1 * inch))
+
+    _embed_figure(arch_path,
+                  "AutoCrew system architecture — Meta Agent → Crew Factory → Modeling & MRM Crews",
+                  fig_num=10, w=16*cm, h=9*cm)
+    _embed_figure(pipeline_path,
+                  "Meta Agent 5-step pipeline — each step is one LLM call producing JSON",
+                  fig_num=11, w=16*cm, h=6*cm)
+    story.append(PageBreak())
+    _embed_figure(crew_path,
+                  "Auto-generated crew structure — Modeling Crew (left) and MRM Crew (right)",
+                  fig_num=12, w=16*cm, h=7*cm)
+    _embed_figure(comparison_path,
+                  "Automation level comparison (left) and AutoCrew execution time breakdown (right)",
+                  fig_num=13, w=16*cm, h=7*cm)
 
     # BUILD
     try:
         doc.build(story)
         print(f"\n[Report] PDF saved to: {output_path}")
     except PermissionError:
-        alt_path = f"results/AutoCrew_Report_{datetime.now().strftime('%H%M%S')}.pdf"
-        doc2 = SimpleDocTemplate(alt_path, pagesize=A4,
-                                  rightMargin=1.5*cm, leftMargin=1.5*cm,
-                                  topMargin=2*cm, bottomMargin=2*cm)
+        alt = output_path.replace(".pdf", f"_{datetime.now().strftime('%H%M%S')}.pdf")
+        doc2 = SimpleDocTemplate(alt, pagesize=A4,
+                                 rightMargin=1.5 * cm, leftMargin=1.5 * cm,
+                                 topMargin=2 * cm, bottomMargin=2 * cm)
         doc2.build(story)
-        print(f"\n[Report] PDF saved to: {alt_path} (original was locked)")
+        print(f"\n[Report] PDF saved to: {alt} (original was locked)")
 
     return output_path
 
 
 if __name__ == "__main__":
-    config_dir = os.path.join(PROJECT_ROOT, "configs", "generated")
-    config_path = None
-    if os.path.exists(config_dir):
-        files = sorted([f for f in os.listdir(config_dir) if f.endswith(".json")])
-        if files:
-            config_path = os.path.join(config_dir, files[-1])
-
-    generate_report(mode="auto", config_path=config_path)
+    generate_report(mode="auto")

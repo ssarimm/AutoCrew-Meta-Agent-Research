@@ -118,12 +118,19 @@ class ComparisonRunner:
         print(report)
         print("=" * 60)
 
-        # Regenerate charts with correct dataset
-        try:
-            from src.evaluation.generate_charts import generate_all
-            ds = results.get("manual", {}).get("dataset", results.get("auto", {}).get("dataset", ""))
-            generate_all(dataset_name=ds)
-        except Exception as e:
-            print(f"[Comparison] Chart regeneration failed: {e}")
-            
         self.collector.save_records()
+
+        # Generate comparison PDF report
+        try:
+            from src.evaluation.report_generator import generate_report
+            manual_r = results.get("manual", {})
+            auto_r = results.get("auto", {})
+            # Use auto results as primary since it has more timing fields;
+            # report_generator will pull manual data from saved metrics
+            generate_report(
+                mode="auto",
+                results=auto_r if auto_r else manual_r,
+                output_path="results/Comparison_Report.pdf",
+            )
+        except Exception as e:
+            print(f"[Comparison] PDF generation failed: {e}")

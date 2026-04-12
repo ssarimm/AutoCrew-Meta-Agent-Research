@@ -12,13 +12,27 @@ def human_gate(modeling_output, phase="MRM Audit"):
     """
     output_str = str(modeling_output)
 
-    # Extract key metrics if present
+    # Extract key metrics if present — handles plain text, markdown bold, and colon formats
     import re
     metrics_found = []
-    for metric in ["accuracy", "f1 score", "precision", "recall"]:
-        match = re.search(rf"{metric}\s*[:=]\s*([\d.]+)", output_str.lower())
-        if match:
-            metrics_found.append(f"  {metric.title()}: {match.group(1)}")
+    seen_labels = set()
+    text_lower = output_str.lower()
+    for metric in ["accuracy", "f1 score", "f1", "precision", "recall"]:
+        label = "F1 Score" if metric in ("f1 score", "f1") else metric.title()
+        if label in seen_labels:
+            continue  # already captured this metric under a different alias
+        for pattern in [
+            rf"\*\*{re.escape(metric)}\*\*\s*[:=]?\s*([\d.]+)",   # **Accuracy**: 0.93
+            rf"{re.escape(metric)}\s*[:=]\s*([\d.]+)",             # Accuracy: 0.93
+            rf"{re.escape(metric)}.*?(0\.\d{{2,4}})",              # Accuracy ... 0.9317
+        ]:
+            match = re.search(pattern, text_lower)
+            if match:
+                val = float(match.group(1))
+                if 0 < val <= 1:
+                    metrics_found.append(f"  {label}: {val:.4f}")
+                    seen_labels.add(label)
+                    break
 
     print("\n")
     print("=" * 55)
