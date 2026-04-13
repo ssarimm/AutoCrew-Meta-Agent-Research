@@ -12,13 +12,18 @@ class EDAtool(BaseTool):
     )
 
     def _run(self, data_path: str) -> str:
+        # Detect if file needs header=None
+        header_arg = ""
+        if "credit_card_approval" in data_path:
+            header_arg = ", header=None"
+
         eda_code = f'''
 import pandas as pd
 import numpy as np
 import warnings
 warnings.filterwarnings("ignore")
 
-df = pd.read_csv("{data_path}")
+df = pd.read_csv("{data_path}"{header_arg})
 
 print("=" * 50)
 print("EXPLORATORY DATA ANALYSIS REPORT")
@@ -39,6 +44,11 @@ if len(missing_df) > 0:
     print(missing_df.to_string())
 else:
     print("No missing values found.")
+
+# Also check for '?' placeholder values
+q_count = (df == '?').sum().sum() if df.dtypes.apply(lambda x: x == object).any() else 0
+if q_count > 0:
+    print(f"\\nWARNING: Found {{q_count}} '?' placeholder values that should be treated as NaN.")
 
 print("\\n--- Descriptive Statistics ---")
 print(df.describe().round(3).to_string())
@@ -81,6 +91,14 @@ else:
                 text=True,
                 timeout=120
             )
+
+            # Cleanup temp file
+            import os
+            try:
+                if os.path.exists("temp_eda.py"):
+                    os.remove("temp_eda.py")
+            except OSError:
+                pass
 
             if result.returncode != 0:
                 return f"EDA Error:\n{result.stderr}"

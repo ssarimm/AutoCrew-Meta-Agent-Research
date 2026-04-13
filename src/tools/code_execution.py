@@ -1,10 +1,15 @@
 from crewai.tools import BaseTool
 import subprocess
 import sys
+import os
+
+
+# Configurable timeout in seconds. Large datasets (500K+ rows) with RandomForest
+# need 300-600s. Set AUTOCREW_CODE_TIMEOUT env var to override.
+CODE_TIMEOUT = int(os.environ.get("AUTOCREW_CODE_TIMEOUT", "600"))
 
 
 # Code injected at the END of any agent script that uses matplotlib.
-# Auto-saves all open figures to figures/agent_plots/ labelled by their plot title.
 _PLOT_SAVE_EPILOGUE = "\n".join([
     "",
     "import os as _os_ac, time as _t_ac",
@@ -36,17 +41,14 @@ class CodeExecutionTool(BaseTool):
     )
 
     def _run(self, code: str) -> str:
+        temp_file = "temp_script.py"
         try:
             # --- Sanitize common JSON-parsing breakage patterns ---
-            # 1. print('\ntext') → JSON \n becomes real newline → unterminated string literal
-            #    Fix: remove the leading \n from print strings — use a blank print() line instead.
             import re as _re
             code = _re.sub(r"print\('\\n([^']*)'", r"print('\1')", code)
             code = _re.sub(r'print\("\\n([^"]*)"', r'print("\1")', code)
 
             # --- Pre-flight syntax check ---
-            # Catches any remaining broken code before wasting a subprocess execution.
-            # Returns specific, actionable error messages so the agent fixes the right thing.
             _FIX_HINT = (
                 "\n\nJSON SERIALIZATION ERRORS — your code was broken before it ran. Two causes:\n"
                 "CAUSE 1 — double-quoted strings break JSON:\n"
@@ -64,21 +66,20 @@ class CodeExecutionTool(BaseTool):
             except SyntaxError as _se:
                 return f"Execution Error:\n  SyntaxError: {_se}{_FIX_HINT}"
 
-            # Prepend non-interactive matplotlib backend to prevent plt.show() from blocking
+            # Prepend non-interactive matplotlib backend
             if "matplotlib" in code or "plt" in code:
                 if "matplotlib.use(" not in code:
                     code = "import matplotlib\nmatplotlib.use('Agg')\n" + code
-                # Append auto-save epilogue so all figures are written to figures/agent_plots/
                 code = code + _PLOT_SAVE_EPILOGUE
 
-            with open("temp_script.py", "w", encoding="utf-8") as f:
+            with open(temp_file, "w", encoding="utf-8") as f:
                 f.write(code)
 
             result = subprocess.run(
-                [sys.executable, "temp_script.py"],
+                [sys.executable, temp_file],
                 capture_output=True,
                 text=True,
-                timeout=180
+                timeout=CODE_TIMEOUT
             )
 
             if result.returncode != 0:
@@ -94,7 +95,7 @@ class CodeExecutionTool(BaseTool):
                 if "keyerror" in error_msg.lower():
                     hints.append(
                         "Hint: The target column name does not exist in the CSV. "
-                        "IMPORTANT: Do NOT trust column names from previous task outputs — prior agents may have hallucinated renamed columns (e.g. 'p' instead of '+'). "
+                        "IMPORTANT: Do NOT trust column names from previous task outputs — prior agents may have hallucinated renamed columns. "
                         "Always detect the target from the raw CSV: "
                         "known = {'SeriousDlqin2yrs', 'Class'}; target_col = next((c for c in known if c in df.columns), df.columns[-1]); "
                         "X = df.drop(columns=[target_col] + [c for c in df.columns if 'unnamed' in c.lower()]); y = df[target_col]"
@@ -103,6 +104,12 @@ class CodeExecutionTool(BaseTool):
                     hints.append("Hint: Handle NaN BEFORE any sklearn transformer. Add: df = df.dropna()  OR  df = df.fillna(df.median(numeric_only=True))")
                 if "filenotfounderror" in error_msg.lower() or "no such file or directory" in error_msg.lower():
                     hints.append("Hint: Use the exact dataset path from your task description. NEVER generate synthetic or fake data as a substitute.")
+                if "pos_label" in error_msg.lower():
+                    hints.append(
+                        "Hint: The target column has string labels (e.g. '+'/'-'). "
+                        "Either encode the target with LabelEncoder before computing metrics, "
+                        "or use average='weighted' in f1_score/precision_score/recall_score."
+                    )
                 if hints:
                     error_msg += "\n\n" + "\n".join(hints)
                 return f"Execution Error:\n{error_msg}"
@@ -111,16 +118,33 @@ class CodeExecutionTool(BaseTool):
             if not output:
                 return "Code executed but printed nothing. Did you forget print()?"
 
-            # Truncate very long outputs to prevent LLM context overflow
+            # Truncate very long outputs
             if len(output) > 3000:
                 output = output[:3000] + f"\n... [output truncated at 3000 chars — {len(result.stdout.strip())} total]"
 
             return f"Execution Output:\n{output}"
 
         except subprocess.TimeoutExpired:
-            return "Error: Code execution timed out (180s limit)."
+            return (
+                f"Error: Code execution timed out ({CODE_TIMEOUT}s limit).\n\n"
+                f"HINT FOR LARGE DATASETS: Your dataset may be too large for RandomForest with 100 trees.\n"
+                f"Try these optimizations (add ALL of them):\n"
+                f"  1. Add n_jobs=-1 to RandomForestClassifier to use all CPU cores\n"
+                f"  2. Reduce n_estimators to 10 or 20\n"
+                f"  3. Add max_depth=15 to limit tree depth\n"
+                f"  4. Sample the training data: X_train = X_train.sample(min(50000, len(X_train)), random_state=42)\n"
+                f"     y_train = y_train.loc[X_train.index]\n"
+                f"Example: RandomForestClassifier(n_estimators=20, max_depth=15, n_jobs=-1, random_state=42, class_weight='balanced')"
+            )
         except Exception as e:
             return f"System Error: {str(e)}"
+        finally:
+            # Cleanup temp file
+            try:
+                if os.path.exists(temp_file):
+                    os.remove(temp_file)
+            except OSError:
+                pass
 
 
 # Singleton instance

@@ -7,6 +7,11 @@ from src.crew_factory.crew_builder import CrewBuilder
 from src.hitl.human_gate import human_gate
 
 
+# Configurable wait time between phases (seconds).
+# Set to 0 to disable, or increase if you're hitting rate limits.
+PHASE_WAIT_SEC = int(os.environ.get("AUTOCREW_PHASE_WAIT", "30"))
+
+
 def _parse_rate_limit_wait(err_msg: str) -> int:
     """
     Extract the required wait time in seconds from a Groq rate limit error message.
@@ -27,9 +32,7 @@ def _is_tpd_error(err_msg: str) -> bool:
 
 
 def _kickoff_with_retry(crew, label: str, max_retries: int = 3):
-    """Run crew.kickoff() with smart backoff on rate-limit errors.
-    Parses the actual reset time from the error message instead of using fixed waits.
-    TPD (tokens-per-day) errors are NOT retried — retrying burns tokens and always fails."""
+    """Run crew.kickoff() with smart backoff on rate-limit errors."""
     for attempt in range(1, max_retries + 1):
         try:
             return crew.kickoff()
@@ -48,6 +51,14 @@ def _kickoff_with_retry(crew, label: str, max_retries: int = 3):
                 time.sleep(wait)
             else:
                 raise
+
+
+def _phase_wait(label: str):
+    """Wait between phases if PHASE_WAIT_SEC > 0. Dynamically adjustable via env var."""
+    wait = PHASE_WAIT_SEC
+    if wait > 0:
+        print(f"\nWaiting {wait}s for API rate limit to reset... ({label})")
+        time.sleep(wait)
 
 
 def run_auto_pipeline(llm, dataset_path, task_desc, llm_provider_name="ollama"):
@@ -82,8 +93,7 @@ def run_auto_pipeline(llm, dataset_path, task_desc, llm_provider_name="ollama"):
     results["config_path"] = config_path
     results["generated_config"] = config
 
-    print("\nWaiting 60s for API rate limit to reset...")
-    time.sleep(60)
+    _phase_wait("before crew building")
 
     print("\n--- Phase 2: Building Crews from JSON ---")
     builder = CrewBuilder(llm)
@@ -103,8 +113,7 @@ def run_auto_pipeline(llm, dataset_path, task_desc, llm_provider_name="ollama"):
     modeling_time = time.time() - model_start
     results["modeling_time_sec"] = round(modeling_time, 2)
 
-    # Collect ALL task outputs so metrics from intermediate tasks (e.g. training)
-    # are not lost when the last task is a model card or documentation task.
+    # Collect ALL task outputs
     if hasattr(modeling_output, "tasks_output") and modeling_output.tasks_output:
         all_task_texts = [
             t.raw for t in modeling_output.tasks_output if t and t.raw
@@ -119,10 +128,9 @@ def run_auto_pipeline(llm, dataset_path, task_desc, llm_provider_name="ollama"):
     output_str = results["modeling_output"]
     print(output_str[:3000] if len(output_str) > 3000 else output_str)
 
-    print("\nWaiting 60s for API rate limit to reset...")
-    time.sleep(60)
+    _phase_wait("before MRM phase")
 
-    # Show remaining Groq quota before MRM phase (works for all Groq models)
+    # Show remaining Groq quota before MRM phase
     if os.environ.get("GROQ_API_KEY") and llm_provider_name.startswith("groq"):
         try:
             from src.utils.groq_limits import show_groq_limits
@@ -154,8 +162,7 @@ def run_auto_pipeline(llm, dataset_path, task_desc, llm_provider_name="ollama"):
         _save_results_json(results)
         return results
 
-    print("\nWaiting 60s for API rate limit to reset...")
-    time.sleep(60)
+    _phase_wait("before MRM crew execution")
 
     if mrm_crew is None:
         print("WARNING: No MRM crew was generated.")
@@ -172,8 +179,6 @@ def run_auto_pipeline(llm, dataset_path, task_desc, llm_provider_name="ollama"):
     mrm_start = time.time()
     mrm_config = config.get("mrm_crew", {})
     if mrm_config.get("tasks"):
-        # Extract only the metric lines from modeling output (keep context short).
-        # Full modeling output can include large EDA reports that bloat MRM task descriptions.
         modeling_summary = _extract_metrics_snippet(str(modeling_output))
         for task in mrm_config["tasks"]:
             if "description" in task:
@@ -182,9 +187,6 @@ def run_auto_pipeline(llm, dataset_path, task_desc, llm_provider_name="ollama"):
                     f"NEVER generate synthetic or fake data. Always load from that path.\n\n"
                     + task["description"]
                 )
-        # Inject modeling metrics into ALL MRM tasks so every agent (including the verdict agent)
-        # has access to the real Accuracy/F1/Precision/Recall values. Without this, the CRO
-        # only sees "Stress Test Passed" from the prior task and hallucinates rounded metrics.
         if modeling_summary:
             for task in mrm_config["tasks"]:
                 if "description" in task:
@@ -192,7 +194,6 @@ def run_auto_pipeline(llm, dataset_path, task_desc, llm_provider_name="ollama"):
                         task["description"]
                         + f"\n\nModeling Metrics (use these — do NOT invent values):\n{modeling_summary}"
                     )
-        # Append verdict fairness note to the LAST task (typically the verdict/approval task)
         last_task = mrm_config["tasks"][-1]
         if "description" in last_task:
             last_task["description"] = (
@@ -226,9 +227,7 @@ def run_auto_pipeline(llm, dataset_path, task_desc, llm_provider_name="ollama"):
 
 
 def _extract_metrics_snippet(modeling_output: str) -> str:
-    """Extract only the metric lines from the modeling output to keep MRM task descriptions short.
-    Looks for lines containing Accuracy, F1, Precision, Recall values. Returns empty string
-    if no metrics are found (e.g. when modeling crew failed entirely)."""
+    """Extract only the metric lines from the modeling output."""
     import re
     lines = modeling_output.splitlines()
     metric_lines = []
@@ -236,7 +235,6 @@ def _extract_metrics_snippet(modeling_output: str) -> str:
         if re.search(r"(accuracy|f1[\s_]?score?|f1|precision|recall)\s*[:\s=]\s*[\d.]+", line, re.IGNORECASE):
             metric_lines.append(line.strip())
     if metric_lines:
-        # Deduplicate and take last occurrence of each metric (final result)
         seen = {}
         for line in metric_lines:
             key = re.match(r"(\w+)", line.lower())
@@ -247,7 +245,7 @@ def _extract_metrics_snippet(modeling_output: str) -> str:
 
 
 def _clear_agent_plots():
-    """Remove plots from previous run so the report only shows current run's graphs."""
+    """Remove plots from previous run."""
     plots_dir = os.path.join("figures", "agent_plots")
     if os.path.exists(plots_dir):
         for f in os.listdir(plots_dir):

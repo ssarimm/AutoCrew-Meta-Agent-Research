@@ -11,3 +11,5 @@ seaborn
 python-dotenv
 reportlab
 litellm
+httpx
+Pillow

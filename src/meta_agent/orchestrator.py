@@ -61,8 +61,6 @@ class MetaAgentOrchestrator:
             subtasks["mrm_subtasks"] = subtasks["mrm_subtasks"][:3]
 
         # CRITICAL: Ensure model training is always present in modeling subtasks.
-        # When the LLM generates 7 steps and we cap to 4, training (step 5) is dropped.
-        # If training is missing, replace the last slot with a guaranteed training task.
         modeling_tasks = subtasks.get("modeling_subtasks", [])
         training_kw = ["train", "classifier", "fit model", "model training", "model evaluation", "evaluat"]
         has_training = any(
@@ -102,14 +100,10 @@ class MetaAgentOrchestrator:
         )
 
         # Post-process: inject dataset path + target column into every code-executing task.
-        # The LLM often writes generic code like df.drop('target') or df.iloc[:,-1] which
-        # picks the wrong column. We extract the explicit target column from the NL task
-        # description and force it into every instruction that executes code.
-        target_hint = self._extract_target_hint(task_description)
+        target_hint = self._extract_target_hint(task_description, dataset_path)
 
         for sid, instr in instructions.items():
             desc = instr.get("task_description", "")
-            # Only process tasks that use execute_python_code (not eda_tool-only tasks)
             tool_list_str = str(tool_map.get(sid, []))
             has_code_tool = "code_execution" in tool_list_str or "execute_python_code" in tool_list_str
             if has_code_tool:
@@ -118,9 +112,12 @@ class MetaAgentOrchestrator:
                     suffix += f"\n\nIMPORTANT: Load the real dataset from '{dataset_path}'. Do NOT generate fake data."
                 if target_hint and target_hint not in desc:
                     suffix += f"\n\n{target_hint}"
-                # Inject robust target detection for training/evaluation tasks ONLY.
-                # Do NOT inject X/y splitting code into EDA or data loading tasks — it confuses
-                # the model and causes empty LLM responses.
+
+                # Inject dataset-specific loading hints
+                ds_hint = self._get_dataset_hint(dataset_path)
+                if ds_hint and ds_hint not in desc:
+                    suffix += f"\n\n{ds_hint}"
+
                 is_eda_or_load = any(kw in desc.lower() for kw in [
                     "exploratory", "eda", "summary statistics", "data types", "missing values",
                     "print df.shape", "print(df.shape", "first 5 rows", "df.head()"
@@ -139,6 +136,14 @@ class MetaAgentOrchestrator:
                             f"X = df.drop(columns=[target_col] + [c for c in df.columns if 'unnamed' in c.lower()]); "
                             f"y = df[target_col]"
                         )
+
+                # Always inject the weighted average reminder for training/eval tasks
+                if is_training_task and "average='weighted'" not in desc:
+                    suffix += (
+                        "\n\nCRITICAL: For f1_score, precision_score, and recall_score, "
+                        "ALWAYS use average='weighted'. NEVER use the default binary average."
+                    )
+
                 if suffix:
                     instr["task_description"] = desc + suffix
 
@@ -161,19 +166,59 @@ class MetaAgentOrchestrator:
 
         return config
 
-    def _extract_target_hint(self, task_description: str) -> str:
-        """
-        Parse the NL task description for an explicit target column name and return
-        a ready-to-inject code hint. Returns empty string if nothing is found.
+    def _get_dataset_hint(self, dataset_path: str) -> str:
+        """Return dataset-specific loading hints for the LLM agents."""
+        if "credit_card_approval" in dataset_path:
+            return (
+                "DATASET HINT: 'credit_card_approval.csv' has NO header row. "
+                "Use pd.read_csv('...', header=None). Columns are integers 0-15. "
+                "Target is the last column (df.columns[-1]). "
+                "Replace '?' with NaN, then dropna()."
+            )
+        elif "cs-training" in dataset_path:
+            return (
+                "DATASET HINT: 'cs-training.csv' has ~30K missing values in MonthlyIncome. "
+                "Use df.fillna(df.median(numeric_only=True)) instead of dropna(). "
+                "Drop 'Unnamed: 0' (row index). Target is 'SeriousDlqin2yrs'."
+            )
+        elif "creditcard_2023" in dataset_path:
+            return (
+                "DATASET HINT: 'creditcard_2023.csv' is highly imbalanced (~0.17% fraud). "
+                "Use class_weight='balanced' in RandomForestClassifier. "
+                "Drop 'id' column if present. Target is 'Class'."
+            )
+        return ""
 
-        Handles patterns like:
-          - "Target column: 'SeriousDlqin2yrs'"
-          - "y = df['SeriousDlqin2yrs']"
-          - "target column is SeriousDlqin2yrs"
+    def _extract_target_hint(self, task_description: str, dataset_path: str = "") -> str:
+        """
+        Parse the NL task description and dataset path for an explicit target column.
+        Returns a ready-to-inject code hint. Returns empty string if nothing is found.
         """
         import re
 
-        # Try "Target column: 'X'" or 'Target column: "X"'
+        # Dataset-path based detection (most reliable)
+        if "credit_card_approval" in dataset_path:
+            return (
+                "TARGET COLUMN: Use df.columns[-1] (the last column). "
+                "This CSV has no header — use pd.read_csv(..., header=None). "
+                "X = df.drop(columns=[df.columns[-1]]); y = df[df.columns[-1]]"
+            )
+        elif "cs-training" in dataset_path:
+            return (
+                "TARGET COLUMN IS 'SeriousDlqin2yrs'. "
+                "Drop 'Unnamed: 0' (it's a row index, not a feature). Use:\n"
+                "  X = df.drop(columns=['SeriousDlqin2yrs'])\n"
+                "  y = df['SeriousDlqin2yrs']"
+            )
+        elif "creditcard_2023" in dataset_path:
+            return (
+                "TARGET COLUMN IS 'Class'. "
+                "Drop 'id' column if present. Use:\n"
+                "  X = df.drop(columns=['Class'])\n"
+                "  y = df['Class']"
+            )
+
+        # Try NL parsing as fallback
         m = re.search(r"[Tt]arget\s+column[:\s]+['\"]?([\w]+)['\"]?", task_description)
         if m:
             col = m.group(1)
@@ -185,7 +230,6 @@ class MetaAgentOrchestrator:
                 f"  y = df[target_col]"
             )
 
-        # Try "y = df['X']" pattern
         m = re.search(r"y\s*=\s*df\[['\"](\w+)['\"]\]", task_description)
         if m:
             col = m.group(1)

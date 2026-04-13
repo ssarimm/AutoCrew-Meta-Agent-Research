@@ -9,11 +9,24 @@ from src.evaluation.terminal_logger import TerminalLogger
 DATASETS = {
     "1": {
         "path": "data/credit_card_approval.csv",
-        "desc": "Predict credit approval (Binary Classification).",
+        "desc": (
+            "Predict credit approval (Binary Classification). "
+            "NOTE: This CSV has NO header row — use pd.read_csv(..., header=None). "
+            "The target is the last column (column 15). "
+            "Use header=None so column names become integers 0-15. "
+            "Replace '?' with NaN, drop NaN rows, LabelEncoder on object columns."
+        ),
+        "has_header": False,
     },
     "2": {
         "path": "data/creditcard_2023.csv",
-        "desc": "Detect Fraud (Imbalanced Data).",
+        "desc": (
+            "Detect Fraud (Imbalanced Binary Classification). "
+            "Target column: 'Class' (1=fraud, 0=legitimate). "
+            "IMPORTANT: This dataset is highly imbalanced (~0.17% fraud). "
+            "Use class_weight='balanced' in RandomForestClassifier. "
+            "Drop 'id' column if present — it is not a feature."
+        ),
     },
     "3": {
         "path": "data/cs-training.csv",
@@ -21,6 +34,8 @@ DATASETS = {
             "Predict probability of financial distress (Credit Scoring). "
             "Target column: 'SeriousDlqin2yrs' (binary: 1=distress, 0=no distress). "
             "Drop 'Unnamed: 0' — it is a row index, not a feature. "
+            "IMPORTANT: Use df.fillna(df.median(numeric_only=True)) instead of dropna() "
+            "because MonthlyIncome and NumberOfDependents have ~30K missing values. "
             "Use X = df.drop(columns=['Unnamed: 0', 'SeriousDlqin2yrs']), y = df['SeriousDlqin2yrs']."
         ),
     },
