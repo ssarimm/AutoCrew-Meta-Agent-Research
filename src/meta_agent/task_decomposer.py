@@ -129,7 +129,7 @@ class TaskDecomposer:
                 temperature=getattr(self.llm, 'temperature', 0.2),
                 api_key=getattr(self.llm, 'api_key', None),
                 base_url=getattr(self.llm, 'base_url', None),
-                max_tokens=600,  # decomposition: 4 subtasks JSON fits in ~400 tokens
+                max_tokens=1200,  # decomposition JSON can be verbose; 600 caused truncation → parse failures
             )
             return response.choices[0].message.content
 
@@ -162,7 +162,7 @@ class TaskDecomposer:
                         f"Load '{dataset_path}'. Replace '?' with NaN, drop NaN rows. "
                         f"Use LabelEncoder on all object columns. Use last column as target. "
                         f"Split 80/20. Train a RandomForestClassifier. "
-                        f"Print Accuracy and F1 Score. Task: {task_description}"
+                        f"Print EXACTLY: Accuracy: X.XXXX, F1 Score: X.XXXX, Precision: X.XXXX, Recall: X.XXXX. Task: {task_description}"
                     ),
                     "depends_on": ["task_0"],
                 },

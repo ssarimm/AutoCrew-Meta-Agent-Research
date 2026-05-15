@@ -65,7 +65,7 @@ class CrewBuilder:
             llm=self.llm,
             verbose=True,
             allow_delegation=agent_def.get("allow_delegation", False),
-            max_iter=8,
+            max_iter=3,
         )
 
         return agent

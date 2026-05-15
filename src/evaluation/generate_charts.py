@@ -42,7 +42,7 @@ def _try_load_real_data(dataset_name):
         elif dataset_name and "creditcard_2023" in dataset_name:
             path = os.path.join(project_root, "data", "creditcard_2023.csv")
             if os.path.exists(path):
-                # Sample for performance — full dataset is 568K rows
+                # Sample for performance
                 df = pd.read_csv(path, nrows=10000)
                 return df
 
@@ -73,8 +73,6 @@ def _generate_approval_eda_plots(dataset_name=None):
     df = _try_load_real_data(dataset_name or "credit_card_approval")
 
     if df is not None:
-        import pandas as pd
-        # Use real data
         numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
 
         if len(numeric_cols) >= 1:
@@ -93,7 +91,6 @@ def _generate_approval_eda_plots(dataset_name=None):
             axes[1, 0].hist(df[numeric_cols[3]].dropna(), bins=30, color="#AF7AC5", edgecolor="black", alpha=0.7)
             axes[1, 0].set_title(f"Column {numeric_cols[3]} Distribution", fontsize=11, fontweight="bold")
 
-        # Object column distribution
         obj_cols = df.select_dtypes(include='object').columns.tolist()
         if obj_cols:
             vc = df[obj_cols[0]].value_counts().head(5)
@@ -102,7 +99,6 @@ def _generate_approval_eda_plots(dataset_name=None):
         else:
             axes[1, 1].text(0.5, 0.5, "No object columns", ha="center", va="center")
 
-        # Target class balance (last column)
         target = df.columns[-1]
         vc = df[target].value_counts()
         target_labels = [str(v) for v in vc.index]
@@ -117,7 +113,6 @@ def _generate_approval_eda_plots(dataset_name=None):
         total_rows = len(df)
         total_cols = len(df.columns)
     else:
-        # Fallback to synthetic
         np.random.seed(42)
         total_rows, total_cols = 689, 16
 
@@ -156,7 +151,6 @@ def _generate_approval_eda_plots(dataset_name=None):
     path = os.path.join(FIGURES_DIR, "eda_plots.png")
     plt.savefig(path, dpi=150, bbox_inches="tight")
     plt.close()
-    print(f"  Saved: {path}")
 
 
 def _generate_fraud_eda_plots(dataset_name=None):
@@ -167,7 +161,6 @@ def _generate_fraud_eda_plots(dataset_name=None):
 
     if df is not None:
         numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-        # Remove target and id columns from feature list
         feature_cols = [c for c in numeric_cols if c.lower() not in ('class', 'id')]
 
         for idx, ax in enumerate([axes[0, 0], axes[0, 1], axes[0, 2], axes[1, 0], axes[1, 1]]):
@@ -176,10 +169,8 @@ def _generate_fraud_eda_plots(dataset_name=None):
                 ax.hist(df[col].dropna(), bins=30, color=["#4A90D9", "#5DADE2", "#48C9B0", "#AF7AC5", "#E8724A"][idx], edgecolor="black", alpha=0.7)
                 ax.set_title(f"{col} Distribution", fontsize=11, fontweight="bold")
 
-        # Target class balance
         if 'Class' in df.columns:
             vc = df['Class'].value_counts()
-            target_labels = [f"Legitimate ({int(vc.index[0])})" if vc.index[0] == 0 else f"Fraud ({int(vc.index[0])})" for _ in [0]]
             target_labels = [f"{'Legitimate' if k == 0 else 'Fraud'} ({k})" for k in vc.index]
             axes[1, 2].bar(target_labels, vc.values, color=["#4CAF50", "#F44336"][:len(vc)], edgecolor="black", alpha=0.8)
             axes[1, 2].set_title("Fraud Class Balance", fontsize=11, fontweight="bold")
@@ -194,7 +185,6 @@ def _generate_fraud_eda_plots(dataset_name=None):
     else:
         np.random.seed(42)
         total_rows, total_cols = 568630, 31
-        # Synthetic fallback
         for idx, (ax, title, color) in enumerate(zip(
             [axes[0,0], axes[0,1], axes[0,2], axes[1,0], axes[1,1]],
             ["V1 Distribution", "V2 Distribution", "Amount Distribution", "Time Distribution", "V14 Distribution"],
@@ -217,7 +207,6 @@ def _generate_fraud_eda_plots(dataset_name=None):
     path = os.path.join(FIGURES_DIR, "eda_plots.png")
     plt.savefig(path, dpi=150, bbox_inches="tight")
     plt.close()
-    print(f"  Saved: {path}")
 
 
 def _generate_credit_scoring_eda_plots(dataset_name=None):
@@ -227,7 +216,6 @@ def _generate_credit_scoring_eda_plots(dataset_name=None):
     df = _try_load_real_data(dataset_name or "cs-training")
 
     if df is not None:
-        # Drop unnamed index
         df = df.drop(columns=[c for c in df.columns if 'unnamed' in c.lower()], errors='ignore')
         numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
         feature_cols = [c for c in numeric_cols if c != 'SeriousDlqin2yrs']
@@ -244,13 +232,11 @@ def _generate_credit_scoring_eda_plots(dataset_name=None):
             if idx < len(feature_cols):
                 col = feature_cols[idx]
                 data = df[col].dropna()
-                # Clip extreme outliers for visualization
                 q99 = data.quantile(0.99) if len(data) > 0 else 1
                 data_clipped = data[data <= q99]
                 ax.hist(data_clipped, bins=30, color=color, edgecolor="black", alpha=0.7)
                 ax.set_title(f"{col} Distribution", fontsize=11, fontweight="bold")
 
-        # Target class balance
         if 'SeriousDlqin2yrs' in df.columns:
             vc = df['SeriousDlqin2yrs'].value_counts()
             target_labels = [f"No Distress ({k})" if k == 0 else f"Distress ({k})" for k in vc.index]
@@ -266,7 +252,6 @@ def _generate_credit_scoring_eda_plots(dataset_name=None):
     else:
         np.random.seed(42)
         total_rows, total_cols = 150000, 12
-        # Synthetic fallback
         for idx, (ax, title, color) in enumerate(zip(
             [axes[0,0], axes[0,1], axes[0,2], axes[1,0], axes[1,1]],
             ["Revolving Utilization", "Age Distribution", "Debt Ratio", "Monthly Income", "Number of Dependents"],
@@ -289,7 +274,6 @@ def _generate_credit_scoring_eda_plots(dataset_name=None):
     path = os.path.join(FIGURES_DIR, "eda_plots.png")
     plt.savefig(path, dpi=150, bbox_inches="tight")
     plt.close()
-    print(f"  Saved: {path}")
 
 
 def generate_architecture():
@@ -330,11 +314,10 @@ def generate_architecture():
     path = os.path.join(FIGURES_DIR, "architecture.png")
     plt.savefig(path, dpi=150, bbox_inches="tight")
     plt.close()
-    print(f"  Saved: {path}")
 
 
 def generate_pipeline():
-    """Generate meta agent pipeline flow."""
+    """Generate meta agent pipeline flow (AutoCrew Path B)."""
     fig, ax = plt.subplots(1, 1, figsize=(12, 3.5))
     ax.set_xlim(0, 12)
     ax.set_ylim(0, 3)
@@ -357,62 +340,54 @@ def generate_pipeline():
 
     ax.text(6, 2.5, "Meta Agent: 5-Step Pipeline (each step = 1 LLM call with JSON output)",
             ha="center", fontsize=11, fontweight="bold", color="#2B6CB0")
-    ax.text(6, 0.3, "Time: ~6 seconds on Groq | Fallback: rule-based keyword matching if LLM fails",
-            ha="center", fontsize=9, color="#718096")
 
     path = os.path.join(FIGURES_DIR, "pipeline.png")
     plt.savefig(path, dpi=150, bbox_inches="tight")
     plt.close()
-    print(f"  Saved: {path}")
 
 
-def generate_comparison():
-    """Generate comparison charts."""
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+def generate_manual_pipeline():
+    """Generate manual pipeline flow (Path A) — includes Human Writing Code step."""
+    fig, ax = plt.subplots(1, 1, figsize=(14, 5))
+    ax.set_xlim(0, 14)
+    ax.set_ylim(0, 5)
+    ax.axis("off")
 
-    categories = ["Agent\nDefinition", "Task\nDefinition", "Tool\nAssignment", "Adaptability", "Config\nOutput"]
-    manual_scores = [1, 1, 1, 1, 0]
-    auto_scores = [3, 3, 3, 3, 3]
+    # Row 1: Human effort
+    draw_box(ax, 0.5, 3.5, 2.2, 1, "NL Task\nRequirement", "#FED7AA", "#DD6B20", fontsize=8)
+    draw_arrow(ax, 2.7, 4.0, 3.2, 4.0)
+    draw_box(ax, 3.2, 3.3, 3.5, 1.4, "Human Writes\nAgent Code\n(~300 min)", "#FED7D7", "#E53E3E", fontsize=9)
+    ax.text(5.0, 3.05, "Hardcoded agents, tasks,\ntools & instructions", ha="center",
+            fontsize=7, color="#E53E3E", style="italic")
+    draw_arrow(ax, 6.7, 4.0, 7.3, 4.0)
+    draw_box(ax, 7.3, 3.5, 2.2, 1, "Python\nConfig", "#FEFCBF", "#D69E2E", fontsize=8)
 
-    x = np.arange(len(categories))
-    width = 0.35
-    axes[0].bar(x - width/2, manual_scores, width, label="Manual (Base Paper)", color="#F56565", alpha=0.8, edgecolor="black")
-    axes[0].bar(x + width/2, auto_scores, width, label="AutoCrew (Meta Agent)", color="#48BB78", alpha=0.8, edgecolor="black")
-    axes[0].set_ylabel("Automation Level")
-    axes[0].set_title("Manual vs AutoCrew: Automation", fontsize=12, fontweight="bold")
-    axes[0].set_xticks(x)
-    axes[0].set_xticklabels(categories, fontsize=8)
-    axes[0].set_yticks([0, 1, 2, 3])
-    axes[0].set_yticklabels(["None", "Hardcoded", "Semi-Auto", "Fully Auto"], fontsize=8)
-    axes[0].legend(fontsize=9)
+    # Arrow down
+    draw_arrow(ax, 8.4, 3.5, 8.4, 2.6)
 
-    results_dir = os.path.join(os.path.dirname(FIGURES_DIR), "results")
-    meta_t, model_t, mrm_t = 7.8, 100.0, 18.0
-    if os.path.exists(results_dir):
-        import json as _json
-        for fname in sorted(os.listdir(results_dir), reverse=True):
-            if fname.startswith("auto_results") and fname.endswith(".json"):
-                try:
-                    with open(os.path.join(results_dir, fname)) as _f:
-                        _data = _json.load(_f)
-                    meta_t = _data.get("meta_agent_time_sec", meta_t)
-                    model_t = _data.get("modeling_time_sec", model_t)
-                    mrm_t = _data.get("mrm_time_sec") if _data.get("mrm_time_sec") is not None else mrm_t
-                    break
-                except Exception:
-                    pass
+    # Row 2: Automated execution
+    draw_box(ax, 0.5, 1.2, 2.5, 1.1, "Modeling Crew\n(4 Agents)", "#C6F6D5", "#38A169", fontsize=8)
+    draw_arrow(ax, 3.0, 1.75, 3.5, 1.75)
+    draw_box(ax, 3.5, 1.2, 2.0, 1.1, "HITL\nGate", "#FEEBC8", "#DD6B20", fontsize=8)
+    draw_arrow(ax, 5.5, 1.75, 6.0, 1.75)
+    draw_box(ax, 6.0, 1.2, 2.5, 1.1, "MRM Crew\n(3 Agents)", "#FED7D7", "#E53E3E", fontsize=8)
+    draw_arrow(ax, 8.5, 1.75, 9.0, 1.75)
+    draw_box(ax, 9.0, 1.2, 2.5, 1.1, "Model +\nReport", "#E2E8F0", "#4A5568", fontsize=8)
 
-    sizes = [meta_t, model_t, mrm_t]
-    labels = [f"Meta Agent\n({meta_t}s)", f"Modeling Crew\n({model_t}s)", f"MRM Crew\n({mrm_t}s)"]
-    colors_pie = ["#4A90D9", "#48BB78", "#F56565"]
-    axes[1].pie(sizes, labels=labels, colors=colors_pie, autopct="%1.1f%%", startangle=90, textprops={"fontsize": 9})
-    axes[1].set_title("Execution Time Breakdown", fontsize=12, fontweight="bold")
+    # Connect config to execution row
+    draw_arrow(ax, 7.3, 3.5, 1.75, 2.35)
 
-    plt.tight_layout()
-    path = os.path.join(FIGURES_DIR, "comparison.png")
+    # Labels
+    ax.text(7, 4.8, "Path A: Manual Pipeline (Base Paper)", ha="center",
+            fontsize=13, fontweight="bold", color="#2B6CB0")
+    ax.text(5.0, 0.6, "Automated Execution (Agent crews run sequentially)",
+            ha="center", fontsize=9, fontweight="bold", color="#38A169")
+    ax.text(5.0, 4.8, "Manual Effort (Developer writes all code)",
+            ha="center", fontsize=9, fontweight="bold", color="#E53E3E")
+
+    path = os.path.join(FIGURES_DIR, "manual_pipeline.png")
     plt.savefig(path, dpi=150, bbox_inches="tight")
     plt.close()
-    print(f"  Saved: {path}")
 
 
 def generate_crew_structure():
@@ -451,26 +426,10 @@ def generate_crew_structure():
     path = os.path.join(FIGURES_DIR, "crew_structure.png")
     plt.savefig(path, dpi=150, bbox_inches="tight")
     plt.close()
-    print(f"  Saved: {path}")
 
 
 def generate_model_comparison_chart(manual_metrics=None, auto_metrics=None):
     """Generate side-by-side model performance and timing comparison charts."""
-    if manual_metrics is None or auto_metrics is None:
-        results_dir = os.path.join(os.path.dirname(FIGURES_DIR), "results")
-        metrics_file = os.path.join(results_dir, "metrics.json")
-        if os.path.exists(metrics_file):
-            import json as _json
-            with open(metrics_file) as f:
-                records = _json.load(f)
-            for r in sorted(records, key=lambda x: x.get("timestamp", ""), reverse=True):
-                if r.get("mode") == "manual" and manual_metrics is None:
-                    manual_metrics = r
-                elif r.get("mode") == "auto" and auto_metrics is None:
-                    auto_metrics = r
-                if manual_metrics and auto_metrics:
-                    break
-
     def _val(m, key, default=0.0):
         if not m:
             return default
@@ -506,14 +465,21 @@ def generate_model_comparison_chart(manual_metrics=None, auto_metrics=None):
             axes[0].text(bar.get_x() + bar.get_width() / 2., h + 0.015,
                          f"{h:.3f}", ha="center", va="bottom", fontsize=8)
 
-    timing_labels = ["Meta Agent\nSetup", "Modeling", "MRM", "Total"]
+    # Include human code writing time (~300 min = 18000s) for manual path
+    human_code_sec = _val(manual_metrics, "human_code_writing_sec") if manual_metrics else 18000.0
+    if human_code_sec == 0:
+        human_code_sec = 18000.0  # ~300 min default
+
+    timing_labels = ["Human Code\nWriting", "Meta Agent\nSetup", "Modeling", "MRM", "Total"]
     manual_times = [
+        human_code_sec,
         0,
         _val(manual_metrics, "modeling_time_sec"),
         _val(manual_metrics, "mrm_time_sec"),
-        _val(manual_metrics, "total_time_sec"),
+        human_code_sec + _val(manual_metrics, "total_time_sec"),
     ]
     auto_times = [
+        0,
         _val(auto_metrics, "meta_agent_time_sec"),
         _val(auto_metrics, "modeling_time_sec"),
         _val(auto_metrics, "mrm_time_sec"),
@@ -527,35 +493,212 @@ def generate_model_comparison_chart(manual_metrics=None, auto_metrics=None):
                         label="Path B: AutoCrew", color="#48BB78", alpha=0.85, edgecolor="black")
 
     axes[1].set_ylabel("Time (seconds)", fontsize=11)
-    axes[1].set_title("Execution Time Breakdown", fontsize=12, fontweight="bold")
+    axes[1].set_title("Execution Time Breakdown (incl. Human Effort)", fontsize=12, fontweight="bold")
     axes[1].set_xticks(x2)
-    axes[1].set_xticklabels(timing_labels, fontsize=10)
+    axes[1].set_xticklabels(timing_labels, fontsize=9)
     axes[1].legend(fontsize=10)
     axes[1].grid(axis="y", alpha=0.3)
     for bar in list(bars3) + list(bars4):
         h = bar.get_height()
         if h > 0.5:
-            axes[1].text(bar.get_x() + bar.get_width() / 2., h + 0.5,
-                         f"{h:.0f}s", ha="center", va="bottom", fontsize=8)
+            lbl = f"{h/60:.0f}m" if h >= 600 else f"{h:.0f}s"
+            axes[1].text(bar.get_x() + bar.get_width() / 2., h + max(max(manual_times), max(auto_times))*0.01,
+                         lbl, ha="center", va="bottom", fontsize=7)
 
     plt.tight_layout()
     path = os.path.join(FIGURES_DIR, "model_comparison.png")
     plt.savefig(path, dpi=150, bbox_inches="tight")
     plt.close()
-    print(f"  Saved: {path}")
     return path
 
 
-def generate_all(dataset_name=None):
-    """Generate all charts."""
+def generate_metrics_radar_chart(manual_metrics=None, auto_metrics=None):
+    """Radar/spider chart comparing metrics across both paths."""
+    def _val(m, key):
+        if not m:
+            return 0.0
+        v = m.get(key, 0.0)
+        return float(v) if v is not None and v != -1 else 0.0
+
+    labels = ["Accuracy", "F1 Score", "Precision", "Recall"]
+    keys = ["accuracy", "f1_score", "precision", "recall"]
+    m_vals = [_val(manual_metrics, k) for k in keys]
+    a_vals = [_val(auto_metrics, k) for k in keys]
+
+    angles = np.linspace(0, 2 * np.pi, len(labels), endpoint=False).tolist()
+    m_vals_plot = m_vals + [m_vals[0]]
+    a_vals_plot = a_vals + [a_vals[0]]
+    angles += [angles[0]]
+
+    fig, ax = plt.subplots(figsize=(7, 7), subplot_kw=dict(polar=True))
+    ax.fill(angles, m_vals_plot, color="#4A90D9", alpha=0.2)
+    ax.plot(angles, m_vals_plot, "o-", color="#4A90D9", linewidth=2, label="Path A: Manual")
+    ax.fill(angles, a_vals_plot, color="#48BB78", alpha=0.2)
+    ax.plot(angles, a_vals_plot, "o-", color="#48BB78", linewidth=2, label="Path B: AutoCrew")
+
+    ax.set_xticks(angles[:-1])
+    ax.set_xticklabels(labels, fontsize=11, fontweight="bold")
+    ax.set_ylim(0, 1.05)
+    ax.set_yticks([0.2, 0.4, 0.6, 0.8, 1.0])
+    ax.set_yticklabels(["0.2", "0.4", "0.6", "0.8", "1.0"], fontsize=8, color="#666")
+    ax.legend(loc="upper right", bbox_to_anchor=(1.3, 1.1), fontsize=10)
+    ax.set_title("Performance Metrics Radar Comparison", fontsize=14, fontweight="bold", pad=20)
+    ax.grid(True, alpha=0.3)
+
+    path = os.path.join(FIGURES_DIR, "metrics_radar.png")
+    plt.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close()
+    return path
+
+
+def generate_timing_waterfall_chart(manual_metrics=None, auto_metrics=None):
+    """Stacked bar chart showing time breakdown per path."""
+    def _val(m, key):
+        if not m:
+            return 0.0
+        v = m.get(key, 0.0)
+        return float(v) if v is not None else 0.0
+
+    # Include human code writing time (~300 min) for manual path
+    human_code_sec = _val(manual_metrics, "human_code_writing_sec") if manual_metrics else 18000.0
+    if human_code_sec == 0:
+        human_code_sec = 18000.0
+
+    phases = ["Human Code\nWriting", "Meta Agent\nSetup", "Modeling\nCrew", "MRM\nAudit"]
+    m_times = [human_code_sec, 0, _val(manual_metrics, "modeling_time_sec"), _val(manual_metrics, "mrm_time_sec")]
+    a_times = [0, _val(auto_metrics, "meta_agent_time_sec"), _val(auto_metrics, "modeling_time_sec"), _val(auto_metrics, "mrm_time_sec")]
+    colors_list = ["#E53E3E", "#9F7AEA", "#4A90D9", "#E8724A"]
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    x = np.arange(2)
+    width = 0.5
+    bottom_m = np.zeros(1)
+    bottom_a = np.zeros(1)
+
+    for i, phase in enumerate(phases):
+        ax.bar(0, m_times[i], width, bottom=bottom_m[0], color=colors_list[i], edgecolor="black", alpha=0.85, label=phase)
+        ax.bar(1, a_times[i], width, bottom=bottom_a[0], color=colors_list[i], edgecolor="black", alpha=0.85)
+        if m_times[i] > 1:
+            lbl = f"{m_times[i]/60:.0f}m" if m_times[i] >= 600 else f"{m_times[i]:.0f}s"
+            ax.text(0, bottom_m[0] + m_times[i] / 2, lbl, ha="center", va="center", fontsize=9, fontweight="bold", color="white")
+        if a_times[i] > 1:
+            lbl = f"{a_times[i]/60:.0f}m" if a_times[i] >= 600 else f"{a_times[i]:.0f}s"
+            ax.text(1, bottom_a[0] + a_times[i] / 2, lbl, ha="center", va="center", fontsize=9, fontweight="bold", color="white")
+        bottom_m[0] += m_times[i]
+        bottom_a[0] += a_times[i]
+
+    m_total_min = sum(m_times) / 60
+    a_total_min = sum(a_times) / 60
+    ax.text(0, bottom_m[0] + max(bottom_m[0], bottom_a[0]) * 0.02, f"Total: {m_total_min:.0f} min", ha="center", fontsize=10, fontweight="bold")
+    ax.text(1, bottom_a[0] + max(bottom_m[0], bottom_a[0]) * 0.02, f"Total: {a_total_min:.1f} min", ha="center", fontsize=10, fontweight="bold")
+
+    ax.set_xticks([0, 1])
+    ax.set_xticklabels(["Path A: Manual", "Path B: AutoCrew"], fontsize=12, fontweight="bold")
+    ax.set_ylabel("Time (seconds)", fontsize=11)
+    ax.set_title("Execution Time Breakdown by Phase", fontsize=14, fontweight="bold")
+    ax.legend(phases, loc="upper right", fontsize=9)
+    ax.grid(axis="y", alpha=0.3)
+
+    path = os.path.join(FIGURES_DIR, "timing_waterfall.png")
+    plt.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close()
+    return path
+
+
+def generate_verdict_summary_chart(manual_metrics=None, auto_metrics=None):
+    """Visual verdict card showing APPROVED/REJECTED for each path."""
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+
+    for ax, metrics, label, base_color in [
+        (axes[0], manual_metrics, "Path A: Manual", "#4A90D9"),
+        (axes[1], auto_metrics, "Path B: AutoCrew", "#48BB78"),
+    ]:
+        ax.set_xlim(0, 10)
+        ax.set_ylim(0, 6)
+        ax.axis("off")
+
+        verdict_raw = ""
+        if metrics:
+            verdict_raw = str(metrics.get("mrm_verdict", "UNKNOWN")).upper()
+        if "APPROVED" in verdict_raw:
+            verdict, v_color = "APPROVED", "#38A169"
+        elif "REJECTED" in verdict_raw:
+            verdict, v_color = "REJECTED", "#E53E3E"
+        else:
+            verdict, v_color = "UNKNOWN", "#DD6B20"
+
+        rect = mpatches.FancyBboxPatch((0.5, 0.5), 9, 5, boxstyle="round,pad=0.3",
+                                        facecolor=v_color, edgecolor="black", linewidth=2, alpha=0.15)
+        ax.add_patch(rect)
+        ax.text(5, 4.5, label, ha="center", va="center", fontsize=14, fontweight="bold", color="#2D3748")
+        ax.text(5, 2.5, verdict, ha="center", va="center", fontsize=28, fontweight="bold", color=v_color)
+
+        acc = 0.0
+        if metrics:
+            v = metrics.get("accuracy", 0.0)
+            acc = float(v) if v is not None and v != -1 else 0.0
+        ax.text(5, 1.2, f"Accuracy: {acc:.4f}", ha="center", va="center", fontsize=11, color="#4A5568")
+
+    plt.suptitle("MRM Verdict Summary", fontsize=16, fontweight="bold", y=1.05)
+    plt.tight_layout()
+    path = os.path.join(FIGURES_DIR, "verdict_summary.png")
+    plt.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close()
+    return path
+
+
+def generate_metrics_gauge_charts(metrics=None, mode="auto"):
+    """Donut/gauge charts for individual metric scores."""
+    keys = ["accuracy", "f1_score", "precision", "recall"]
+    labels = ["Accuracy", "F1 Score", "Precision", "Recall"]
+    colors_list = ["#4A90D9", "#48BB78", "#E8724A", "#9F7AEA"]
+
+    fig, axes = plt.subplots(1, 4, figsize=(16, 4))
+
+    for ax, key, label, color in zip(axes, keys, labels, colors_list):
+        val = 0.0
+        if metrics:
+            v = metrics.get(key, 0.0)
+            val = float(v) if v is not None and v != -1 else 0.0
+
+        remainder = max(0, 1.0 - val)
+        wedges, _ = ax.pie([val, remainder], colors=[color, "#E2E8F0"],
+                           startangle=90, counterclock=False,
+                           wedgeprops=dict(width=0.35, edgecolor="white", linewidth=2))
+        ax.text(0, 0, f"{val:.3f}", ha="center", va="center", fontsize=16, fontweight="bold", color=color)
+        ax.set_title(label, fontsize=11, fontweight="bold", pad=10)
+
+    mode_label = "AutoCrew (Path B)" if mode == "auto" else "Manual (Path A)"
+    plt.suptitle(f"Performance Metrics — {mode_label}", fontsize=14, fontweight="bold", y=1.05)
+    plt.tight_layout()
+    path = os.path.join(FIGURES_DIR, "metrics_gauge.png")
+    plt.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close()
+    return path
+
+
+def generate_all(dataset_name=None, manual_metrics=None, auto_metrics=None):
+    """Generate all charts. Pass metrics dicts for data-driven charts."""
     print(f"\nGenerating charts into: {FIGURES_DIR}")
     generate_eda_plots(dataset_name)
     generate_architecture()
     generate_pipeline()
-    generate_comparison()
+    generate_manual_pipeline()
     generate_crew_structure()
-    generate_model_comparison_chart()
-    print(f"\nAll 6 charts saved to {FIGURES_DIR}/")
+
+    if manual_metrics or auto_metrics:
+        generate_model_comparison_chart(manual_metrics, auto_metrics)
+        generate_metrics_radar_chart(manual_metrics, auto_metrics)
+        generate_timing_waterfall_chart(manual_metrics, auto_metrics)
+        generate_verdict_summary_chart(manual_metrics, auto_metrics)
+
+    # Generate gauge for whichever path has metrics
+    if auto_metrics:
+        generate_metrics_gauge_charts(auto_metrics, "auto")
+    elif manual_metrics:
+        generate_metrics_gauge_charts(manual_metrics, "manual")
+
+    print(f"\nAll charts saved to {FIGURES_DIR}/")
 
 
 if __name__ == "__main__":

@@ -69,11 +69,10 @@ class MetaAgentOrchestrator:
             for st in modeling_tasks
         )
         if not has_training and modeling_tasks:
-            inject_idx = len(modeling_tasks) - 1
-            reuse_id = modeling_tasks[inject_idx]["id"]
+            inject_idx = max(0, len(modeling_tasks) - 1)  # insert before last (docs) task
             prev_id = modeling_tasks[inject_idx - 1]["id"] if inject_idx > 0 else None
             training_task = {
-                "id": reuse_id,
+                "id": "task_train_injected",
                 "name": "Model Training and Evaluation",
                 "description": (
                     f"Train a RandomForestClassifier on '{dataset_path}'. "
@@ -84,7 +83,7 @@ class MetaAgentOrchestrator:
                 ),
                 "depends_on": [prev_id] if prev_id else [],
             }
-            modeling_tasks[inject_idx] = training_task
+            modeling_tasks.insert(inject_idx, training_task)  # insert before docs, not replace
             subtasks["modeling_subtasks"] = modeling_tasks
             print(f"[Meta Agent] No training task found — injected 'Model Training and Evaluation' at slot {inject_idx}")
 
@@ -185,7 +184,8 @@ class MetaAgentOrchestrator:
             return (
                 "DATASET HINT: 'creditcard_2023.csv' is highly imbalanced (~0.17% fraud). "
                 "Use class_weight='balanced' in RandomForestClassifier. "
-                "Drop 'id' column if present. Target is 'Class'."
+                "Drop 'id' column with errors='ignore': df.drop(columns=['id'], errors='ignore'). "
+                "Target is 'Class'."
             )
         return ""
 

@@ -21,11 +21,12 @@ def show_groq_limits(label: str = "", model: str = None) -> None:
     """
     api_key = os.environ.get("GROQ_API_KEY")
     if not api_key:
-        return
+        return   # silently skip — not using Groq
 
     # Strip the 'groq/' prefix if present (Groq REST API uses bare model names)
     groq_model = (model or "llama-3.3-70b-versatile").replace("groq/", "")
 
+    # Only print the banner now that we know Groq is active
     heading = f"GROQ API LIMITS — {label}" if label else "GROQ API LIMITS"
     print("\n" + "-" * 52)
     print(f"  {heading}  [{groq_model}]")

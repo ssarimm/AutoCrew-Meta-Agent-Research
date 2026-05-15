@@ -1,3 +1,5 @@
+import uuid
+
 from crewai.tools import BaseTool
 import subprocess
 import sys
@@ -41,8 +43,11 @@ class CodeExecutionTool(BaseTool):
     )
 
     def _run(self, code: str) -> str:
-        temp_file = "temp_script.py"
+        
+        import uuid
+        temp_file = f"temp_{uuid.uuid4().hex}.py"
         try:
+            
             # --- Sanitize common JSON-parsing breakage patterns ---
             import re as _re
             code = _re.sub(r"print\('\\n([^']*)'", r"print('\1')", code)
@@ -115,14 +120,16 @@ class CodeExecutionTool(BaseTool):
                 return f"Execution Error:\n{error_msg}"
 
             output = result.stdout.strip()
+            if "Traceback" in output or "SyntaxError" in output:
+                return f"Execution Error:\n{output}"
             if not output:
-                return "Code executed but printed nothing. Did you forget print()?"
+                return "CODE EXECUTION RESULT:\nNo output printed.\nEND OF RESULT"
 
             # Truncate very long outputs
             if len(output) > 3000:
                 output = output[:3000] + f"\n... [output truncated at 3000 chars — {len(result.stdout.strip())} total]"
 
-            return f"Execution Output:\n{output}"
+            return f"CODE EXECUTION RESULT:\n{output}\nEND OF RESULT"
 
         except subprocess.TimeoutExpired:
             return (

@@ -1,538 +1,614 @@
-"""
-AutoCrew PDF Report Generator
-Focused on Path A (Manual) vs Path B (AutoCrew) comparison.
-"""
 import os
-import re
-import json
+import glob
 from datetime import datetime
-from reportlab.lib.pagesizes import A4
-from reportlab.lib import colors
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.units import inch, cm
-from reportlab.platypus import (
-    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
-    PageBreak, Image
-)
-from reportlab.lib.enums import TA_CENTER
 
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-FIGURES_DIR = os.path.join(PROJECT_ROOT, "figures")
-
-# ── Human setup time estimate ──────────────────────────────────────────────────
-# For Path A (Manual), a developer must hand-code every agent definition and task
-# instruction in Python before a single run can happen.  This one-time effort is
-# invisible in wall-clock run timings but is a real cost that AutoCrew eliminates.
-#
-# Estimation breakdown (experienced CrewAI developer):
-#   - 6 agent definitions (role, goal, backstory, tool selection) @ 15 min each → 90 min
-#   - 6 task descriptions (detailed LLM-quality instructions)     @ 20 min each → 120 min
-#   - Tool registry wiring + pipeline integration                              →  30 min
-#   - Testing, debugging, and prompt iteration                                 →  60 min
-#   ─────────────────────────────────────────────────────────────────────────────────────
-#   Total estimate                                                             → 300 min
-#
-HUMAN_SETUP_TIME_SEC = 300 * 60  # 300 minutes = 18 000 s
-HUMAN_SETUP_LABEL    = "~300 min (est.)"  # shown in tables
-
-
-def _get_dataset_display_name(path):
-    if "creditcard_2023" in path:
-        return "Fraud Detection — creditcard_2023.csv"
-    elif "cs-training" in path:
-        return "Credit Scoring — cs-training.csv (Give Me Some Credit)"
-    elif "credit_card_approval" in path:
-        return "Credit Card Approval — credit_card_approval.csv"
-    return path or "Unknown dataset"
-
-
-def _extract_metric(text: str, metric_name: str) -> float:
-    """Extract a numeric metric from output text. Returns -1 if not found."""
-    patterns = [
-        rf"\*\*{re.escape(metric_name)}\*\*\s*[:=]?\s*([\d.]+)",
-        rf"{re.escape(metric_name)}\s*[:=]\s*([\d.]+)",
-        rf"{re.escape(metric_name)}.*?(0\.\d{{2,4}})",
-    ]
-    text_lower = text.lower()
-    for pattern in patterns:
-        match = re.search(pattern, text_lower)
-        if match:
-            try:
-                val = float(match.group(1))
-                if val > 1:
-                    val /= 100.0
-                if 0 < val <= 1:
-                    return round(val, 4)
-            except ValueError:
-                continue
-    return -1.0
-
-
-def _extract_all_metrics(results: dict) -> dict:
-    """Extract ML metrics and timing from a pipeline results dict."""
-    text = results.get("modeling_output", "") or ""
-    return {
-        "accuracy":  _extract_metric(text, "accuracy"),
-        "f1_score":  _extract_metric(text, "f1"),
-        "precision": _extract_metric(text, "precision"),
-        "recall":    _extract_metric(text, "recall"),
-        "meta_agent_time_sec": results.get("meta_agent_time_sec", 0) or 0,
-        "modeling_time_sec":   results.get("modeling_time_sec", 0) or 0,
-        "mrm_time_sec":        results.get("mrm_time_sec", 0) or 0,
-        "total_time_sec":      results.get("total_time_sec", 0) or 0,
-        "mrm_verdict": results.get("mrm_verdict", "N/A"),
-        "mode": results.get("mode", "unknown"),
-    }
-
-
-def _load_latest_metrics_from_file():
-    """Load manual and auto metrics from the most recent results JSON files."""
-    manual, auto = {}, {}
-    results_dir = os.path.join(PROJECT_ROOT, "results")
-    if not os.path.exists(results_dir):
-        return manual, auto
-
-    # Check metrics.json first
-    mfile = os.path.join(results_dir, "metrics.json")
-    if os.path.exists(mfile):
-        with open(mfile) as f:
-            records = json.load(f)
-        for r in sorted(records, key=lambda x: x.get("timestamp", ""), reverse=True):
-            if r.get("mode") == "manual" and not manual:
-                manual = r
-            elif r.get("mode") == "auto" and not auto:
-                auto = r
-            if manual and auto:
-                break
-
-    # Fall back to individual result files
-    if not manual:
-        for fname in sorted(os.listdir(results_dir), reverse=True):
-            if fname.startswith("manual_results") and fname.endswith(".json"):
-                with open(os.path.join(results_dir, fname)) as f:
-                    raw = json.load(f)
-                manual = _extract_all_metrics(raw)
-                manual["mode"] = "manual"
-                break
-    if not auto:
-        for fname in sorted(os.listdir(results_dir), reverse=True):
-            if fname.startswith("auto_results") and fname.endswith(".json"):
-                with open(os.path.join(results_dir, fname)) as f:
-                    raw = json.load(f)
-                auto = _extract_all_metrics(raw)
-                auto["mode"] = "auto"
-                break
-
-    return manual, auto
-
-
-def generate_report(
-    mode="auto",
-    results=None,
-    output_path="results/AutoCrew_Report.pdf",
-    **_,   # absorb legacy config_path= calls without error
-):
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-
-    # Build metrics for the current run
-    current_metrics = _extract_all_metrics(results) if results else {}
-
-    # Load previous run metrics from file for the other path
-    saved_manual, saved_auto = _load_latest_metrics_from_file()
-
-    if mode == "manual":
-        manual_metrics = current_metrics
-        auto_metrics = saved_auto
-    else:
-        manual_metrics = saved_manual
-        auto_metrics = current_metrics
-
-    dataset_name = (results.get("dataset", "") if results else "") or \
-                   manual_metrics.get("dataset", "") or auto_metrics.get("dataset", "")
-
-    # Generate / update all charts for this run
-    print("[Report] Generating charts...")
-    chart_path = None
-    eda_path = None
-    arch_path = os.path.join(FIGURES_DIR, "architecture.png")
-    pipeline_path = os.path.join(FIGURES_DIR, "pipeline.png")
-    comparison_path = os.path.join(FIGURES_DIR, "comparison.png")
-    crew_path = os.path.join(FIGURES_DIR, "crew_structure.png")
-
-    try:
-        from src.evaluation.generate_charts import (
-            generate_model_comparison_chart,
-            generate_eda_plots,
-            generate_architecture,
-            generate_pipeline,
-            generate_comparison,
-            generate_crew_structure,
-        )
-        chart_path = generate_model_comparison_chart(
-            manual_metrics if manual_metrics else None,
-            auto_metrics if auto_metrics else None,
-        )
-        generate_eda_plots(dataset_name)
-        eda_path = os.path.join(FIGURES_DIR, "eda_plots.png")
-        generate_architecture()
-        generate_pipeline()
-        generate_comparison()
-        generate_crew_structure()
-    except Exception as e:
-        print(f"[Report] Chart generation failed: {e}")
-        # Fall back to whatever already exists on disk
-        eda_path = os.path.join(FIGURES_DIR, "eda_plots.png") if os.path.exists(os.path.join(FIGURES_DIR, "eda_plots.png")) else None
-
-    # ── PDF setup ──────────────────────────────────────────────────────────────
-    doc = SimpleDocTemplate(
-        output_path, pagesize=A4,
-        rightMargin=1.5 * cm, leftMargin=1.5 * cm,
-        topMargin=2 * cm, bottomMargin=2 * cm,
+try:
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib import colors
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import cm
+    from reportlab.lib.enums import TA_CENTER, TA_LEFT
+    from reportlab.platypus import (
+        SimpleDocTemplate, Paragraph, Spacer, Image, Table, TableStyle,
+        PageBreak, HRFlowable
     )
+except ImportError:
+    print("[ReportGenerator] reportlab not installed. Please install with `pip install reportlab`.")
+
+RESULTS_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "results")
+FIGURES_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "figures")
+
+
+def _get_styles():
     styles = getSampleStyleSheet()
+    styles.add(ParagraphStyle(
+        name='CoverTitle',
+        parent=styles['Title'],
+        fontSize=26,
+        textColor=colors.HexColor("#1a1a2e"),
+        spaceAfter=8,
+        alignment=TA_CENTER,
+    ))
+    styles.add(ParagraphStyle(
+        name='CoverSubtitle',
+        parent=styles['Normal'],
+        fontSize=14,
+        textColor=colors.HexColor("#2B6CB0"),
+        spaceAfter=6,
+        alignment=TA_CENTER,
+    ))
+    styles.add(ParagraphStyle(
+        name='CoverMeta',
+        parent=styles['Normal'],
+        fontSize=10,
+        textColor=colors.HexColor("#718096"),
+        spaceAfter=4,
+        alignment=TA_CENTER,
+    ))
+    styles.add(ParagraphStyle(
+        name='MainTitle',
+        parent=styles['Title'],
+        fontSize=18,
+        textColor=colors.HexColor("#1a1a2e"),
+        spaceAfter=12,
+    ))
+    styles.add(ParagraphStyle(
+        name='SectionHeader',
+        parent=styles['Heading2'],
+        fontSize=14,
+        textColor=colors.HexColor("#2B6CB0"),
+        spaceBefore=14,
+        spaceAfter=6,
+    ))
+    styles.add(ParagraphStyle(
+        name='SubSection',
+        parent=styles['Heading3'],
+        fontSize=12,
+        textColor=colors.HexColor("#4A5568"),
+        spaceBefore=8,
+        spaceAfter=4,
+    ))
+    styles.add(ParagraphStyle(
+        name='NormalText',
+        parent=styles['Normal'],
+        fontSize=10,
+        spaceAfter=6,
+    ))
+    styles.add(ParagraphStyle(
+        name='SmallText',
+        parent=styles['Normal'],
+        fontSize=8,
+        textColor=colors.HexColor("#A0AEC0"),
+        spaceAfter=2,
+    ))
+    return styles
 
-    styles.add(ParagraphStyle("MainTitle", parent=styles["Title"],
-        fontSize=20, spaceAfter=6, textColor=colors.HexColor("#1a1a2e")))
-    styles.add(ParagraphStyle("SubTitle", parent=styles["Normal"],
-        fontSize=11, alignment=TA_CENTER,
-        textColor=colors.HexColor("#666666"), spaceAfter=16))
-    styles.add(ParagraphStyle("SectionHead", parent=styles["Heading1"],
-        fontSize=14, textColor=colors.HexColor("#16213e"),
-        spaceBefore=18, spaceAfter=8,
-        borderWidth=1, borderColor=colors.HexColor("#0f3460"), borderPadding=4))
-    styles.add(ParagraphStyle("BodyText2", parent=styles["Normal"],
-        fontSize=10, leading=14, spaceAfter=6))
-    styles.add(ParagraphStyle("Caption", parent=styles["Normal"],
-        fontSize=9, alignment=TA_CENTER,
-        textColor=colors.HexColor("#888888"), spaceAfter=10))
-    styles.add(ParagraphStyle("VerdictApproved", parent=styles["Normal"],
-        fontSize=11, textColor=colors.HexColor("#276749"), spaceAfter=4))
-    styles.add(ParagraphStyle("VerdictRejected", parent=styles["Normal"],
-        fontSize=11, textColor=colors.HexColor("#c53030"), spaceAfter=4))
 
+def _add_page_number(canvas, doc):
+    """Add page number footer to each page."""
+    canvas.saveState()
+    canvas.setFont('Helvetica', 8)
+    canvas.setFillColor(colors.HexColor("#A0AEC0"))
+    canvas.drawRightString(A4[0] - 1.5 * cm, 1 * cm, f"Page {doc.page}")
+    canvas.drawString(1.5 * cm, 1 * cm, "AutoCrew Evaluation Report")
+    canvas.restoreState()
+
+
+def _separator():
+    """Returns a horizontal line separator."""
+    return HRFlowable(width="100%", thickness=1, color=colors.HexColor("#CBD5E0"),
+                      spaceBefore=6, spaceAfter=6)
+
+
+def _safe_embed_image(story, img_path, styles, title=None, width=16*cm, height=None):
+    """Embed an image if it exists, with optional title."""
+    if os.path.exists(img_path):
+        if title:
+            story.append(Paragraph(title, styles['SectionHeader']))
+        try:
+            # Clamp height to max page-safe value (about 20cm for A4 with margins)
+            max_h = 20 * cm
+            actual_height = min(height, max_h) if height else None
+            if actual_height:
+                story.append(Image(img_path, width=width, height=actual_height))
+            else:
+                story.append(Image(img_path, width=width))
+        except Exception as e:
+            story.append(Paragraph(f"<i>[Chart could not be embedded: {e}]</i>", styles['SmallText']))
+        story.append(Spacer(1, 0.4 * cm))
+        return True
+    return False
+
+
+def _collect_agent_plots():
+    """Collect agent-generated plots from figures/agent_plots/."""
+    plots_dir = os.path.join(FIGURES_DIR, "agent_plots")
+    if not os.path.isdir(plots_dir):
+        return []
+    return sorted(glob.glob(os.path.join(plots_dir, "*.png")))
+
+
+def _build_cover_page(story, styles, title, mode, dataset, extra_lines=None):
+    """Add a branded cover page."""
+    story.append(Spacer(1, 4 * cm))
+    story.append(Paragraph(title, styles['CoverTitle']))
+    story.append(Spacer(1, 0.5 * cm))
+
+    mode_badge = "Path A — Manual Pipeline" if mode == "manual" else (
+        "Path B — AutoCrew Meta Agent Pipeline" if mode == "auto" else
+        "Path A (Manual) vs Path B (AutoCrew)"
+    )
+    story.append(Paragraph(mode_badge, styles['CoverSubtitle']))
+    story.append(Spacer(1, 0.8 * cm))
+    story.append(_separator())
+    story.append(Spacer(1, 0.3 * cm))
+
+    ds_name = os.path.basename(dataset) if dataset else "Unknown"
+    story.append(Paragraph(f"Dataset: <b>{ds_name}</b>", styles['CoverMeta']))
+    story.append(Paragraph(f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", styles['CoverMeta']))
+    story.append(Paragraph("Generated by AutoCrew Evaluation Framework", styles['CoverMeta']))
+
+    if extra_lines:
+        story.append(Spacer(1, 0.3 * cm))
+        for line in extra_lines:
+            story.append(Paragraph(line, styles['CoverMeta']))
+
+    story.append(Spacer(1, 1 * cm))
+    story.append(_separator())
+    story.append(PageBreak())
+
+
+def _build_metrics_table(story, styles, results, mode):
+    """Add a performance metrics summary table."""
+    story.append(Paragraph("Performance Metrics Summary", styles['SectionHeader']))
+
+    def _fmt(v):
+        if v is None or v == -1 or v == "":
+            return "N/A"
+        try:
+            return f"{float(v):.4f}"
+        except (ValueError, TypeError):
+            return str(v)
+
+    data = [["Metric", "Value", "Status"]]
+    metric_keys = [
+        ("accuracy", "Accuracy"),
+        ("f1_score", "F1 Score"),
+        ("precision", "Precision"),
+        ("recall", "Recall"),
+    ]
+
+    for key, label in metric_keys:
+        val = results.get(key, None)
+        if val is None:
+            # Try extracting from modeling_output
+            import re
+            raw = results.get("modeling_output", "")
+            m = re.search(rf"{key.replace('_', '.?')}[\s:=]+([0-9]+\.?[0-9]*)", raw, re.IGNORECASE)
+            if m:
+                try:
+                    val = float(m.group(1))
+                    if val > 1.0:
+                        val = val / 100.0
+                except ValueError:
+                    pass
+
+        fmt_val = _fmt(val)
+        try:
+            fval = float(val) if val is not None and val != -1 else 0.0
+        except (ValueError, TypeError):
+            fval = 0.0
+
+        if fval >= 0.8:
+            status = "Excellent"
+        elif fval >= 0.7:
+            status = "Good"
+        elif fval >= 0.5:
+            status = "Fair"
+        elif fval > 0:
+            status = "Poor"
+        else:
+            status = "—"
+        data.append([label, fmt_val, status])
+
+    t = Table(data, colWidths=[6 * cm, 4 * cm, 4 * cm])
+    style_cmds = [
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#2B6CB0")),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, 0), (-1, 0), 11),
+        ('BOTTOMPADDING', (0, 0), (-1, 0), 10),
+        ('TOPPADDING', (0, 1), (-1, -1), 6),
+        ('BOTTOMPADDING', (0, 1), (-1, -1), 6),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E0")),
+    ]
+    # Color-code rows based on status
+    for i in range(1, len(data)):
+        status = data[i][2]
+        if status == "Excellent":
+            style_cmds.append(('BACKGROUND', (0, i), (-1, i), colors.HexColor("#F0FFF4")))
+        elif status == "Good":
+            style_cmds.append(('BACKGROUND', (0, i), (-1, i), colors.HexColor("#FEFCBF")))
+        elif status == "Fair":
+            style_cmds.append(('BACKGROUND', (0, i), (-1, i), colors.HexColor("#FFF5F5")))
+        else:
+            style_cmds.append(('BACKGROUND', (0, i), (-1, i), colors.HexColor("#F7FAFC")))
+
+    t.setStyle(TableStyle(style_cmds))
+    story.append(t)
+    story.append(Spacer(1, 0.5 * cm))
+
+
+def _build_timing_table(story, styles, results, mode):
+    """Add execution timing table."""
+    story.append(Paragraph("Execution Time Breakdown", styles['SectionHeader']))
+    time_data = [["Phase", "Time"]]
+    if mode == "manual":
+        time_data.append(["Human Code Writing (estimated)", "~300 min"])
+    if mode == "auto":
+        time_data.append(["Meta Agent Config Generation", f"{results.get('meta_agent_time_sec', 0.0):.1f}s"])
+    time_data.append(["Modeling Crew Execution", f"{results.get('modeling_time_sec', 0.0):.1f}s"])
+    time_data.append(["MRM Audit Execution", f"{results.get('mrm_time_sec', 0.0):.1f}s"])
+    agent_total = results.get('total_time_sec', 0.0)
+    time_data.append(["Agent Execution Total", f"{agent_total:.1f}s"])
+    if mode == "manual":
+        grand_total_min = 300 + (agent_total / 60)
+        time_data.append(["Grand Total (incl. Human Effort)", f"~{grand_total_min:.0f} min"])
+
+    t = Table(time_data, colWidths=[10 * cm, 5 * cm])
+    t.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#2B6CB0")),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
+        ('BACKGROUND', (0, 1), (-1, -1), colors.HexColor("#F7FAFC")),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E0")),
+        ('FONTNAME', (0, -1), (-1, -1), 'Helvetica-Bold'),
+    ]))
+    story.append(t)
+    story.append(Spacer(1, 0.5 * cm))
+
+
+def _build_verdict_section(story, styles, results):
+    """Add MRM verdict section with color badge."""
+    story.append(Paragraph("MRM Verdict", styles['SectionHeader']))
+    verdict = str(results.get("mrm_verdict", "UNKNOWN"))
+
+    if "APPROVED" in verdict.upper():
+        v_color = "#38A169"
+        badge = "✓ APPROVED"
+    elif "REJECTED" in verdict.upper():
+        v_color = "#E53E3E"
+        badge = "✗ REJECTED"
+    else:
+        v_color = "#DD6B20"
+        badge = "? " + verdict[:30]
+
+    story.append(Paragraph(
+        f"<font color='{v_color}' size='16'><b>{badge}</b></font>",
+        styles['NormalText']
+    ))
+
+    # Show full verdict text if it's long
+    if len(verdict) > 30:
+        story.append(Spacer(1, 0.2 * cm))
+        clean = verdict.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\n", "<br/>")
+        story.append(Paragraph(f"<i>{clean}</i>", styles['SmallText']))
+
+    story.append(Spacer(1, 0.5 * cm))
+
+
+def _build_output_section(story, styles, results, max_chars=2000):
+    """Add modeling output snippet."""
+    story.append(Paragraph("Modeling Output Snippet", styles['SectionHeader']))
+    raw_output = str(results.get("modeling_output", ""))
+    snip = raw_output[:max_chars] + "..." if len(raw_output) > max_chars else raw_output
+    snip = snip.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\n", "<br/>")
+    story.append(Paragraph(snip, styles['NormalText']))
+    story.append(Spacer(1, 0.5 * cm))
+
+
+# ===========================================================================
+# PUBLIC API
+# ===========================================================================
+
+def generate_report(mode: str, results: dict, output_path: str, config_path: str = None):
+    """
+    Generates a professional PDF report for a single run (Manual or Auto).
+    """
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+
+    doc = SimpleDocTemplate(
+        output_path,
+        pagesize=A4,
+        rightMargin=1.5 * cm, leftMargin=1.5 * cm,
+        topMargin=2 * cm, bottomMargin=2 * cm
+    )
+    styles = _get_styles()
     story = []
 
-    def make_table(data, widths, header_color="#16213e"):
-        t = Table(data, colWidths=widths)
-        t.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(header_color)),
-            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-            ("FONTSIZE", (0, 0), (-1, -1), 9),
-            ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#cccccc")),
-            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
-            ("TOPPADDING", (0, 0), (-1, -1), 6),
-            ("ROWBACKGROUNDS", (0, 1), (-1, -1),
-             [colors.white, colors.HexColor("#f8f9fa")]),
-        ]))
-        return t
+    # --- Cover Page ---
+    title = "AutoCrew Meta Agent Pipeline Report" if mode == "auto" else "Manual Pipeline Report"
+    dataset = results.get('dataset', 'Unknown')
+    _build_cover_page(story, styles, title, mode, dataset)
 
-    def fmt_metric(v):
-        """Format a metric value or return N/A."""
-        try:
-            f = float(v)
-            return f"{f:.4f}" if f >= 0 else "N/A"
-        except (TypeError, ValueError):
-            return "N/A"
+    # --- Metrics Summary ---
+    _build_metrics_table(story, styles, results, mode)
 
-    def fmt_time(v):
-        try:
-            f = float(v)
-            return f"{f:.1f}s" if f > 0 else "—"
-        except (TypeError, ValueError):
-            return "—"
+    # --- Timing ---
+    _build_timing_table(story, styles, results, mode)
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # PAGE 1: COVER
-    # ══════════════════════════════════════════════════════════════════════════
-    story.append(Spacer(1, 1.5 * inch))
-    story.append(Paragraph("AutoCrew", styles["MainTitle"]))
-    story.append(Paragraph(
-        "Path A (Manual) vs Path B (AutoCrew) — Comparison Report",
-        styles["SubTitle"]))
-    story.append(Spacer(1, 0.3 * inch))
-    story.append(Paragraph(
-        f"Generated: {datetime.now().strftime('%B %d, %Y  %H:%M')}",
-        styles["SubTitle"]))
-    story.append(Paragraph(
-        f"Dataset: <b>{_get_dataset_display_name(dataset_name)}</b>",
-        styles["SubTitle"]))
-    story.append(Spacer(1, 0.4 * inch))
+    # --- Verdict ---
+    _build_verdict_section(story, styles, results)
 
-    cover_data = [
-        ["Path", "Method", "Status"],
-        ["Path A — Manual", "Hardcoded agents/tasks (base paper)",
-         "Metrics loaded" if any(v > 0 for v in [manual_metrics.get("accuracy", -1)]) else "No data"],
-        ["Path B — AutoCrew", "Meta Agent auto-generates crew from NL",
-         "Metrics loaded" if any(v > 0 for v in [auto_metrics.get("accuracy", -1)]) else "No data"],
-    ]
-    story.append(make_table(cover_data, [3.5 * cm, 9 * cm, 4 * cm], "#1a1a2e"))
-    story.append(PageBreak())
+    story.append(_separator())
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # PAGE 2: MODEL PERFORMANCE COMPARISON  (KEY PAGE)
-    # ══════════════════════════════════════════════════════════════════════════
-    story.append(Paragraph("1. Model Performance Comparison", styles["SectionHead"]))
-    story.append(Paragraph(
-        "Both paths train a <b>Random Forest Classifier</b> on the same dataset. "
-        "The table below shows the test-set metrics for each path.",
-        styles["BodyText2"]))
+    # --- Charts Section ---
+    story.append(Paragraph("Charts & Visualizations", styles['MainTitle']))
 
-    perf_data = [
-        ["Metric", "Path A: Manual", "Path B: AutoCrew", "Difference"],
-    ]
-    for label, key in [("Accuracy", "accuracy"), ("F1 Score", "f1_score"),
-                       ("Precision", "precision"), ("Recall", "recall")]:
-        mv = manual_metrics.get(key, -1)
-        av = auto_metrics.get(key, -1)
-        if mv is not None and mv < 0:
-            mv = -1
-        if av is not None and av < 0:
-            av = -1
-        mv_f = float(mv) if mv not in (None, -1) else None
-        av_f = float(av) if av not in (None, -1) else None
-        if mv_f is not None and av_f is not None:
-            diff = f"{av_f - mv_f:+.4f}"
-        else:
-            diff = "N/A"
-        perf_data.append([label, fmt_metric(mv), fmt_metric(av), diff])
+    # Metrics gauge (constrained height to avoid vertical stretching)
+    _safe_embed_image(story, os.path.join(FIGURES_DIR, "metrics_gauge.png"),
+                      styles, "Performance Gauge", width=16 * cm, height=4.5 * cm)
 
-    t = make_table(perf_data, [3.5 * cm, 4.5 * cm, 4.5 * cm, 4 * cm], "#0f3460")
-    # Highlight difference column
-    for row_idx in range(1, len(perf_data)):
-        diff_val = perf_data[row_idx][3]
-        if diff_val.startswith("+") and diff_val != "N/A":
-            t.setStyle(TableStyle([
-                ("TEXTCOLOR", (3, row_idx), (3, row_idx), colors.HexColor("#276749")),
-                ("FONTNAME", (3, row_idx), (3, row_idx), "Helvetica-Bold"),
-            ]))
-        elif diff_val.startswith("-"):
-            t.setStyle(TableStyle([
-                ("TEXTCOLOR", (3, row_idx), (3, row_idx), colors.HexColor("#c53030")),
-                ("FONTNAME", (3, row_idx), (3, row_idx), "Helvetica-Bold"),
-            ]))
-    story.append(t)
-    story.append(Spacer(1, 0.2 * inch))
+    # EDA
+    _safe_embed_image(story, os.path.join(FIGURES_DIR, "eda_plots.png"),
+                      styles, "Dataset EDA Plots", width=15 * cm, height=9 * cm)
 
-    # Embed the comparison bar chart
-    if chart_path and os.path.exists(chart_path):
-        story.append(Image(chart_path, width=16 * cm, height=7 * cm))
-        story.append(Paragraph(
-            "Figure 1: Model performance scores and execution time — Manual vs AutoCrew",
-            styles["Caption"]))
-    story.append(PageBreak())
+    # Architecture (auto only)
+    if mode == "auto":
+        _safe_embed_image(story, os.path.join(FIGURES_DIR, "architecture.png"),
+                          styles, "System Architecture", width=15 * cm, height=8 * cm)
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # PAGE: DATASET ANALYSIS (EDA)
-    # ══════════════════════════════════════════════════════════════════════════
-    story.append(Paragraph("2. Dataset Analysis", styles["SectionHead"]))
-    story.append(Paragraph(
-        f"Exploratory data analysis of <b>{_get_dataset_display_name(dataset_name)}</b>. "
-        "Charts show feature distributions, class balance, and key statistics. "
-        "Both paths train on the same unmodified dataset.",
-        styles["BodyText2"]))
-    if eda_path and os.path.exists(eda_path):
-        story.append(Spacer(1, 0.1 * inch))
-        story.append(Image(eda_path, width=16 * cm, height=9.5 * cm))
-        story.append(Paragraph(
-            "Figure 2: EDA — feature distributions and class balance",
-            styles["Caption"]))
+    # Pipeline — mode-specific
+    if mode == "manual":
+        _safe_embed_image(story, os.path.join(FIGURES_DIR, "manual_pipeline.png"),
+                          styles, "Manual Pipeline Flow (incl. Human Code Writing)",
+                          width=15 * cm, height=6 * cm)
     else:
-        story.append(Paragraph("<i>EDA chart not available.</i>", styles["BodyText2"]))
-    story.append(PageBreak())
+        _safe_embed_image(story, os.path.join(FIGURES_DIR, "pipeline.png"),
+                          styles, "Meta Agent Pipeline Flow", width=15 * cm, height=5 * cm)
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # AGENT-GENERATED PLOTS (inserted if any exist)
-    # ══════════════════════════════════════════════════════════════════════════
-    agent_plots_dir = os.path.join(PROJECT_ROOT, "figures", "agent_plots")
-    agent_plot_files = []
-    if os.path.exists(agent_plots_dir):
-        agent_plot_files = sorted([
-            os.path.join(agent_plots_dir, f)
-            for f in os.listdir(agent_plots_dir)
-            if f.endswith(".png")
-        ])
+    # Crew structure
+    _safe_embed_image(story, os.path.join(FIGURES_DIR, "crew_structure.png"),
+                      styles, "Generated Crew Structure", width=15 * cm, height=6 * cm)
 
-    if agent_plot_files:
-        story.append(Paragraph("3. Agent-Generated Plots", styles["SectionHead"]))
-        story.append(Paragraph(
-            "The following charts were automatically generated by agents during code execution.",
-            styles["BodyText2"]))
+    # Agent-generated plots
+    agent_plots = _collect_agent_plots()
+    if agent_plots:
+        story.append(Paragraph("Agent-Generated Plots", styles['SectionHeader']))
+        for plot_path in agent_plots:
+            plot_name = os.path.basename(plot_path).replace(".png", "").replace("_", " ").title()
+            _safe_embed_image(story, plot_path, styles, plot_name, width=14 * cm)
 
-        for i, plot_path in enumerate(agent_plot_files):
-            # Derive a human-readable label from the filename:
-            # format is  <timestamp>_<sanitised_title>.png
-            fname = os.path.basename(plot_path).replace(".png", "")
-            parts = fname.split("_", 1)          # split off timestamp
-            raw_label = parts[1] if len(parts) > 1 else fname
-            label = raw_label.replace("_", " ").strip().title() or f"Plot {i + 1}"
+    story.append(_separator())
 
-            try:
-                # Fit each plot to the page width; preserve aspect ratio
-                from PIL import Image as PILImage
-                with PILImage.open(plot_path) as img:
-                    w_px, h_px = img.size
-                max_w = 15 * cm
-                aspect = h_px / w_px
-                img_w = max_w
-                img_h = min(max_w * aspect, 10 * cm)
-            except Exception:
-                img_w, img_h = 15 * cm, 9 * cm
+    # --- Raw Output ---
+    _build_output_section(story, styles, results)
 
-            story.append(Spacer(1, 0.15 * inch))
-            story.append(Image(plot_path, width=img_w, height=img_h))
-            story.append(Paragraph(
-                f"Figure {3 + i}: {label}",
-                styles["Caption"]))
-
-        story.append(PageBreak())
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # PAGE 3: EXECUTION TIMING
-    # ══════════════════════════════════════════════════════════════════════════
-    story.append(Paragraph("4. Execution Time Comparison", styles["SectionHead"]))
-    story.append(Paragraph(
-        "Wall-clock run time is measured automatically. "
-        "Path A also incurs a one-time <b>human setup cost</b> — the engineering effort "
-        "required to hand-code every agent definition, task instruction, and tool "
-        "assignment before the pipeline can execute. "
-        "Path B eliminates this cost entirely: the Meta Agent generates the full crew "
-        "configuration from a single natural-language sentence.",
-        styles["BodyText2"]))
-    story.append(Spacer(1, 0.1 * inch))
-
-    manual_total = manual_metrics.get("total_time_sec", 0) or 0
-    auto_total   = auto_metrics.get("total_time_sec", 0) or 0
-
-    def fmt_total_with_setup(run_sec):
-        """Show run time + human setup as a combined total."""
-        if run_sec <= 0:
-            return f"— + {HUMAN_SETUP_LABEL}"
-        combined_min = (run_sec + HUMAN_SETUP_TIME_SEC) / 60
-        return f"{fmt_time(run_sec)} + {HUMAN_SETUP_LABEL}\n= ~{combined_min:.0f} min total"
-
-    timing_data = [
-        ["Phase", "Path A: Manual", "Path B: AutoCrew", "Notes"],
-        ["Human Setup\n(one-time, estimated)",
-         HUMAN_SETUP_LABEL,
-         "~6 s (automated)",
-         "Write agent defs, task instructions,\ntool assignments, debug & iterate"],
-        ["Meta Agent Config", "—",
-         fmt_time(auto_metrics.get("meta_agent_time_sec")),
-         "LLM crew generation (AutoCrew only)"],
-        ["Modeling Crew",
-         fmt_time(manual_metrics.get("modeling_time_sec")),
-         fmt_time(auto_metrics.get("modeling_time_sec")),
-         "Train model + write model card"],
-        ["MRM Crew",
-         fmt_time(manual_metrics.get("mrm_time_sec")),
-         fmt_time(auto_metrics.get("mrm_time_sec")),
-         "Compliance, stress test, verdict"],
-        ["Run Time Total",
-         fmt_time(manual_total),
-         fmt_time(auto_total),
-         "Automated wall-clock time only"],
-        ["Total incl.\nHuman Setup",
-         fmt_total_with_setup(manual_total),
-         fmt_time(auto_total),
-         "Full cost: human effort + run time"],
-    ]
-    t = make_table(timing_data, [3.5 * cm, 4 * cm, 3.5 * cm, 5.5 * cm], "#27ae60")
-    # Highlight the "Total incl. Human Setup" row
-    last_row = len(timing_data) - 1
-    t.setStyle(TableStyle([
-        ("FONTNAME", (0, last_row), (-1, last_row), "Helvetica-Bold"),
-        ("BACKGROUND", (0, last_row), (-1, last_row), colors.HexColor("#e8f5e9")),
-        ("TEXTCOLOR", (1, last_row), (1, last_row), colors.HexColor("#c53030")),  # Manual cost in red
-        ("TEXTCOLOR", (2, last_row), (2, last_row), colors.HexColor("#276749")),  # AutoCrew cost in green
-    ]))
-    # Highlight the human setup row
-    t.setStyle(TableStyle([
-        ("BACKGROUND", (0, 1), (-1, 1), colors.HexColor("#fff3e0")),
-    ]))
-    story.append(t)
-    story.append(Spacer(1, 0.1 * inch))
-    story.append(Paragraph(
-        "<i>Human setup time estimate: 6 agents × 15 min (definition) + "
-        "6 tasks × 20 min (instructions) + 30 min (integration) + "
-        "60 min (testing/debugging) = 300 min. "
-        "Assumes an experienced CrewAI developer. "
-        "AutoCrew reduces this to the ~6 s Meta Agent config phase.</i>",
-        styles["Caption"]))
-    story.append(PageBreak())
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # PAGE 4: MRM VERDICTS + CREW COMPARISON
-    # ══════════════════════════════════════════════════════════════════════════
-    story.append(Paragraph("5. MRM Audit Verdicts", styles["SectionHead"]))
-
-    for path_label, m in [("Path A: Manual", manual_metrics),
-                           ("Path B: AutoCrew", auto_metrics)]:
-        verdict = str(m.get("mrm_verdict", "N/A"))
-        style = styles["VerdictApproved"] if "approved" in verdict.lower() else styles["VerdictRejected"]
-        story.append(Paragraph(f"<b>{path_label}:</b>  {verdict[:300]}", style))
-
-    story.append(Spacer(1, 0.2 * inch))
-    story.append(Paragraph("6. Architecture Comparison", styles["SectionHead"]))
-    story.append(make_table([
-        ["Dimension", "Path A: Manual", "Path B: AutoCrew"],
-        ["Agent definition", "Hardcoded in Python", "Generated by Meta Agent LLM"],
-        ["Task instructions", "Hardcoded in Python", "Generated from natural language"],
-        ["Tool assignment", "Manual in code", "Auto-selected from registry"],
-        ["To add a new task", "Rewrite Python classes", "Change one sentence"],
-        ["Configuration saved?", "No", "Yes — crew_config.json"],
-        ["Crew size", "3 + 3 (fixed)", "Dynamic (LLM decides)"],
-        ["Setup time", "~300 min (hardcoding)", "~6 seconds (LLM call)"],
-    ], [4.5 * cm, 6 * cm, 6 * cm], "#8e44ad"))
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # PAGE: SYSTEM DIAGRAMS
-    # ══════════════════════════════════════════════════════════════════════════
-    story.append(PageBreak())
-    story.append(Paragraph("7. System Diagrams", styles["SectionHead"]))
-
-    def _embed_figure(path, caption, fig_num, w=16*cm, h=8*cm):
-        if path and os.path.exists(path):
-            story.append(Image(path, width=w, height=h))
-            story.append(Paragraph(f"Figure {fig_num}: {caption}", styles["Caption"]))
-            story.append(Spacer(1, 0.15 * inch))
-
-    # Architecture overview
-    story.append(Paragraph(
-        "The diagrams below show the AutoCrew system architecture, the Meta Agent 5-step "
-        "pipeline, the auto-generated crew structure, and the automation level comparison.",
-        styles["BodyText2"]))
-    story.append(Spacer(1, 0.1 * inch))
-
-    _embed_figure(arch_path,
-                  "AutoCrew system architecture — Meta Agent → Crew Factory → Modeling & MRM Crews",
-                  fig_num=10, w=16*cm, h=9*cm)
-    _embed_figure(pipeline_path,
-                  "Meta Agent 5-step pipeline — each step is one LLM call producing JSON",
-                  fig_num=11, w=16*cm, h=6*cm)
-    story.append(PageBreak())
-    _embed_figure(crew_path,
-                  "Auto-generated crew structure — Modeling Crew (left) and MRM Crew (right)",
-                  fig_num=12, w=16*cm, h=7*cm)
-    _embed_figure(comparison_path,
-                  "Automation level comparison (left) and AutoCrew execution time breakdown (right)",
-                  fig_num=13, w=16*cm, h=7*cm)
-
-    # BUILD
+    # Build PDF
     try:
-        doc.build(story)
-        print(f"\n[Report] PDF saved to: {output_path}")
-    except PermissionError:
-        alt = output_path.replace(".pdf", f"_{datetime.now().strftime('%H%M%S')}.pdf")
-        doc2 = SimpleDocTemplate(alt, pagesize=A4,
-                                 rightMargin=1.5 * cm, leftMargin=1.5 * cm,
-                                 topMargin=2 * cm, bottomMargin=2 * cm)
-        doc2.build(story)
-        print(f"\n[Report] PDF saved to: {alt} (original was locked)")
-
+        doc.build(story, onFirstPage=_add_page_number, onLaterPages=_add_page_number)
+        print(f"  Saved {mode} PDF Report -> {output_path}")
+    except Exception as e:
+        print(f"[ReportGenerator] Failed to build PDF: {e}")
     return output_path
 
 
-if __name__ == "__main__":
-    generate_report(mode="auto")
+def generate_comparison_report(manual_metrics: dict, auto_metrics: dict, output_path: str = None):
+    """
+    Generates a professional PDF comparing the Manual (Path A) and Auto (Path B) paths.
+    """
+    if not output_path:
+        output_path = os.path.join(RESULTS_DIR, "Comparison_Report.pdf")
+
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+
+    # If the file is locked (e.g. open in a PDF viewer), use a timestamped fallback
+    if os.path.exists(output_path):
+        try:
+            with open(output_path, "a"):
+                pass
+        except PermissionError:
+            from datetime import datetime
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            output_path = os.path.join(RESULTS_DIR, f"Comparison_Report_{ts}.pdf")
+            print(f"[ReportGenerator] Comparison_Report.pdf is locked — writing to {os.path.basename(output_path)}")
+
+    doc = SimpleDocTemplate(
+        output_path,
+        pagesize=A4,
+        rightMargin=1.5 * cm, leftMargin=1.5 * cm,
+        topMargin=2 * cm, bottomMargin=2 * cm
+    )
+    styles = _get_styles()
+    story = []
+
+    # --- Cover Page ---
+    dataset = manual_metrics.get("dataset", auto_metrics.get("dataset", "Unknown"))
+    _build_cover_page(story, styles, "Path Comparison Report", "comparison", dataset,
+                      extra_lines=["Manual (Path A) vs AutoCrew (Path B)"])
+
+    # --- Metrics Comparison Table ---
+    story.append(Paragraph("Performance Metrics Comparison", styles['SectionHeader']))
+    data = [["Metric", "Path A (Manual)", "Path B (AutoCrew)", "Winner"]]
+
+    metric_keys = [("accuracy", "Accuracy"), ("f1_score", "F1 Score"),
+                   ("precision", "Precision"), ("recall", "Recall")]
+
+    for k, label in metric_keys:
+        m_val = manual_metrics.get(k, 0.0) or 0.0
+        a_val = auto_metrics.get(k, 0.0) or 0.0
+        try:
+            m_f = float(m_val)
+        except (ValueError, TypeError):
+            m_f = 0.0
+        try:
+            a_f = float(a_val)
+        except (ValueError, TypeError):
+            a_f = 0.0
+        winner = "AutoCrew ★" if a_f > m_f else ("Manual ★" if m_f > a_f else "Tie")
+        data.append([label, f"{m_f:.4f}", f"{a_f:.4f}", winner])
+
+    # Timing (agent execution only)
+    m_time = manual_metrics.get("total_time_sec", 0.0) or 0.0
+    a_time = auto_metrics.get("total_time_sec", 0.0) or 0.0
+    data.append(["Agent Exec Time", f"{m_time:.1f}s", f"{a_time:.1f}s", "—"])
+
+    # Total including human effort (~300 min for manual)
+    m_total_min = 300 + (m_time / 60)
+    a_total_min = a_time / 60
+    time_winner = "AutoCrew ★"  # Always wins when including human effort
+    data.append(["Total (incl. Human)", f"~{m_total_min:.0f} min", f"{a_total_min:.1f} min", time_winner])
+
+    # Verdicts
+    m_verdict = str(manual_metrics.get("mrm_verdict", ""))
+    a_verdict = str(auto_metrics.get("mrm_verdict", ""))
+    m_v_short = "APPROVED" if "APPROVED" in m_verdict.upper() else ("REJECTED" if "REJECTED" in m_verdict.upper() else "UNKNOWN")
+    a_v_short = "APPROVED" if "APPROVED" in a_verdict.upper() else ("REJECTED" if "REJECTED" in a_verdict.upper() else "UNKNOWN")
+    data.append(["MRM Verdict", m_v_short, a_v_short, "—"])
+
+    t = Table(data, colWidths=[3.5 * cm, 4 * cm, 4 * cm, 3.5 * cm])
+    style_cmds = [
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#2B6CB0")),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, 0), (-1, 0), 10),
+        ('BOTTOMPADDING', (0, 0), (-1, 0), 10),
+        ('TOPPADDING', (0, 1), (-1, -1), 6),
+        ('BOTTOMPADDING', (0, 1), (-1, -1), 6),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E0")),
+    ]
+    # Highlight winner rows
+    for i in range(1, len(data)):
+        winner = data[i][3]
+        if "AutoCrew" in winner:
+            style_cmds.append(('BACKGROUND', (3, i), (3, i), colors.HexColor("#F0FFF4")))
+        elif "Manual" in winner:
+            style_cmds.append(('BACKGROUND', (3, i), (3, i), colors.HexColor("#EBF8FF")))
+        style_cmds.append(('BACKGROUND', (0, i), (0, i), colors.HexColor("#F7FAFC")))
+
+    t.setStyle(TableStyle(style_cmds))
+    story.append(t)
+    story.append(Spacer(1, 0.5 * cm))
+
+    # --- Verdict Summary ---
+    story.append(Paragraph("Verdict Summary", styles['SectionHeader']))
+    for label, v_short, v_full in [
+        ("Path A (Manual)", m_v_short, m_verdict),
+        ("Path B (AutoCrew)", a_v_short, a_verdict),
+    ]:
+        v_color = "#38A169" if v_short == "APPROVED" else ("#E53E3E" if v_short == "REJECTED" else "#DD6B20")
+        story.append(Paragraph(
+            f"<b>{label}:</b> <font color='{v_color}' size='13'><b>{v_short}</b></font>",
+            styles['NormalText']
+        ))
+    story.append(Spacer(1, 0.5 * cm))
+    story.append(_separator())
+
+    # --- All Charts ---
+    story.append(Paragraph("Comparison Charts", styles['MainTitle']))
+
+    _safe_embed_image(story, os.path.join(FIGURES_DIR, "model_comparison.png"),
+                      styles, "Model Performance & Timing Comparison", width=16 * cm, height=7 * cm)
+
+    _safe_embed_image(story, os.path.join(FIGURES_DIR, "metrics_radar.png"),
+                      styles, "Metrics Radar Comparison", width=12 * cm, height=12 * cm)
+
+    _safe_embed_image(story, os.path.join(FIGURES_DIR, "timing_waterfall.png"),
+                      styles, "Execution Time Waterfall", width=14 * cm, height=8 * cm)
+
+    _safe_embed_image(story, os.path.join(FIGURES_DIR, "verdict_summary.png"),
+                      styles, "Verdict Summary Cards", width=14 * cm, height=6 * cm)
+
+    story.append(_separator())
+    story.append(Paragraph("System & Data Visualizations", styles['MainTitle']))
+
+    _safe_embed_image(story, os.path.join(FIGURES_DIR, "eda_plots.png"),
+                      styles, "Dataset EDA Plots", width=15 * cm, height=9 * cm)
+
+    _safe_embed_image(story, os.path.join(FIGURES_DIR, "architecture.png"),
+                      styles, "System Architecture", width=15 * cm, height=8 * cm)
+
+    _safe_embed_image(story, os.path.join(FIGURES_DIR, "pipeline.png"),
+                      styles, "Path B: Meta Agent Pipeline Flow", width=15 * cm, height=5 * cm)
+
+    _safe_embed_image(story, os.path.join(FIGURES_DIR, "manual_pipeline.png"),
+                      styles, "Path A: Manual Pipeline Flow (incl. Human Code Writing)",
+                      width=15 * cm, height=6 * cm)
+
+    _safe_embed_image(story, os.path.join(FIGURES_DIR, "crew_structure.png"),
+                      styles, "Generated Crew Structure", width=15 * cm, height=6 * cm)
+
+    # Agent plots
+    agent_plots = _collect_agent_plots()
+    if agent_plots:
+        story.append(Paragraph("Agent-Generated Plots", styles['SectionHeader']))
+        for plot_path in agent_plots:
+            plot_name = os.path.basename(plot_path).replace(".png", "").replace("_", " ").title()
+            _safe_embed_image(story, plot_path, styles, plot_name, width=14 * cm)
+
+    # --- Conclusions ---
+    story.append(_separator())
+    story.append(Paragraph("Conclusions", styles['SectionHeader']))
+
+    # Auto-generate winner analysis
+    metric_wins = {"manual": 0, "auto": 0}
+    for k, _ in metric_keys:
+        m_v = float(manual_metrics.get(k, 0) or 0)
+        a_v = float(auto_metrics.get(k, 0) or 0)
+        if a_v > m_v:
+            metric_wins["auto"] += 1
+        elif m_v > a_v:
+            metric_wins["manual"] += 1
+
+    if metric_wins["auto"] > metric_wins["manual"]:
+        conclusion = (
+            f"AutoCrew (Path B) outperformed Manual (Path A) on "
+            f"{metric_wins['auto']} out of {len(metric_keys)} metrics. "
+            f"The meta-agent approach demonstrates superior automated crew generation."
+        )
+    elif metric_wins["manual"] > metric_wins["auto"]:
+        conclusion = (
+            f"Manual (Path A) outperformed AutoCrew (Path B) on "
+            f"{metric_wins['manual']} out of {len(metric_keys)} metrics. "
+            f"The hand-crafted pipeline shows advantages in this configuration."
+        )
+    else:
+        conclusion = (
+            "Both paths achieved comparable performance across all metrics. "
+            "The AutoCrew meta-agent approach matches manual pipeline quality."
+        )
+
+    story.append(Paragraph(conclusion, styles['NormalText']))
+
+    # Timing analysis
+    if m_time > 0 and a_time > 0:
+        if a_time < m_time:
+            speed = ((m_time - a_time) / m_time) * 100
+            story.append(Paragraph(
+                f"AutoCrew was <b>{speed:.1f}%</b> faster than the Manual pipeline "
+                f"({a_time:.0f}s vs {m_time:.0f}s).",
+                styles['NormalText']
+            ))
+        elif m_time < a_time:
+            speed = ((a_time - m_time) / a_time) * 100
+            story.append(Paragraph(
+                f"Manual pipeline was <b>{speed:.1f}%</b> faster than AutoCrew "
+                f"({m_time:.0f}s vs {a_time:.0f}s). "
+                f"Note: AutoCrew includes meta-agent setup overhead of "
+                f"{auto_metrics.get('meta_agent_time_sec', 0):.0f}s.",
+                styles['NormalText']
+            ))
+
+    story.append(Spacer(1, 1 * cm))
+
+    # Build PDF
+    try:
+        doc.build(story, onFirstPage=_add_page_number, onLaterPages=_add_page_number)
+        print(f"  Saved Comparison PDF Report -> {output_path}")
+    except Exception as e:
+        print(f"[ReportGenerator] Failed to build Comparison PDF: {e}")
+    return output_path

@@ -87,6 +87,39 @@ class ManualMRMCrew:
     def __init__(self, llm):
         self.llm = llm
 
+    def _summarize_for_compliance(self, modeling_output: str) -> str:
+        """
+        Build a focused compliance summary from the full modeling output.
+        Extracts: metric lines, algorithm name, dataset path, model card section.
+        Much better than blindly truncating to 2000 chars (metrics may appear later).
+        """
+        import re
+        lines = modeling_output.splitlines()
+        key_lines = []
+
+        # Grab all metric lines anywhere in output
+        for line in lines:
+            if re.search(r"(accuracy|f1[\s_]?score|precision|recall|algorithm|dataset|random\s*forest)"
+                         r"\s*[:\-=]\s*[\d\w]", line, re.IGNORECASE):
+                key_lines.append(line.strip())
+
+        # Grab model card section (up to 800 chars)
+        mc_match = re.search(r"#+\s*model\s+card", modeling_output, re.IGNORECASE)
+        model_card_section = ""
+        if mc_match:
+            model_card_section = modeling_output[mc_match.start():][:800]
+
+        summary_parts = []
+        if key_lines:
+            summary_parts.append("Key Metrics & Algorithm Lines Found:\n" + "\n".join(key_lines[:20]))
+        if model_card_section:
+            summary_parts.append("Model Card Section:\n" + model_card_section)
+        if not summary_parts:
+            # Fallback: first 2000 chars
+            summary_parts.append(modeling_output[:2000])
+
+        return "\n\n".join(summary_parts)
+
     def run(self, modeling_output, dataset_path="data/credit_card_approval.csv"):
         load_block, rf_params, sampling_block = _build_stress_test_code(dataset_path)
 
@@ -132,8 +165,8 @@ class ManualMRMCrew:
 
         task1 = Task(
             description=(
-                f"Review this Model Card and check if it is complete:\n\n"
-                f"{str(modeling_output)[:2000]}\n\n"
+                f"Review this Model Card output and check if it contains the required fields:\n\n"
+                f"{self._summarize_for_compliance(str(modeling_output))}\n\n"
                 f"Check for: Accuracy value, F1 Score value, algorithm name, dataset used. "
                 f"Output: PASS if all present, FAIL with missing items listed."
             ),
@@ -205,7 +238,9 @@ class ManualMRMCrew:
             tasks=[task1, task2, task3],
             process=Process.sequential,
             memory=False,
-            verbose=False,
+            verbose=True,
+            tracing=False,
+            max_rpm=5
         )
 
         return crew.kickoff()

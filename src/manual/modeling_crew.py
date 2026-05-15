@@ -147,7 +147,13 @@ class ManualModelingCrew:
             description=(
                 f"Use the execute_python_code tool to run this exact Python script:\n"
                 f"import pandas as pd\n"
+                f"import numpy as np\n"
+                f"from sklearn.preprocessing import LabelEncoder\n"
                 f"df = pd.read_csv('{dataset_path}'{header_param})\n"
+                f"df = df.replace('?', np.nan)\n"
+                f"df = df.dropna()\n"
+                f"for col in df.select_dtypes(include='object').columns:\n"
+                f"    df[col] = LabelEncoder().fit_transform(df[col])\n"
                 f"print('Shape:', df.shape)\n"
                 f"print('Columns:', list(df.columns))\n"
                 f"print('Missing values:', df.isnull().sum().sum())\n"
@@ -159,7 +165,7 @@ class ManualModelingCrew:
 
         task2 = Task(
             description=(
-                f"Use the execute_python_code tool to run this EXACT Python script — copy it verbatim:\n\n"
+                f"Use the execute_python_code tool to run this exact Python script:\n"
                 f"import pandas as pd\n"
                 f"import numpy as np\n"
                 f"from sklearn.model_selection import train_test_split\n"
@@ -177,9 +183,7 @@ class ManualModelingCrew:
                 f"print('Accuracy:', round(accuracy_score(y_test, y_pred), 4))\n"
                 f"print('F1 Score:', round(f1_score(y_test, y_pred, average='weighted'), 4))\n"
                 f"print('Precision:', round(precision_score(y_test, y_pred, average='weighted'), 4))\n"
-                f"print('Recall:', round(recall_score(y_test, y_pred, average='weighted'), 4))\n\n"
-                f"Your Final Answer MUST be the exact four lines printed by the code. "
-                f"Do not add any other text, JSON, or formatting."
+                f"print('Recall:', round(recall_score(y_test, y_pred, average='weighted'), 4))"
             ),
             expected_output=(
                 "Exactly four lines:\n"
@@ -224,7 +228,9 @@ class ManualModelingCrew:
             tasks=[task1, task2, task3],
             process=Process.sequential,
             memory=False,
-            verbose=False,
+            verbose=True,
+            tracing=False,
+            max_rpm=5
         )
 
         return crew.kickoff()

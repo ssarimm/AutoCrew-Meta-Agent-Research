@@ -1,0 +1,6 @@
+Algorithm: Random Forest Classifier
+Dataset: data/credit_card_approval.csv
+Accuracy: 0.4351
+F1 Score: 0.3243
+Precision: 0.2687
+Recall: 0.4351

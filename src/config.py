@@ -1,4 +1,9 @@
 import os
+
+os.environ["CREWAI_TELEMETRY"] = "false"
+os.environ["CREWAI_TRACE"] = "false"
+os.environ["CREWAI_LOG_LEVEL"] = "ERROR"
+
 from dotenv import load_dotenv
 from crewai import LLM
 from langchain_community.chat_models import FakeListChatModel
@@ -8,26 +13,46 @@ load_dotenv(override=True)
 import litellm
 litellm.drop_params = True
 litellm.num_retries = 30
-litellm.retry_wait_time = 45
+litellm.retry_wait_time = 70
 
-# Prevent crewai from erroring when OpenAI key is missing
 if "OPENAI_API_KEY" not in os.environ:
     os.environ["OPENAI_API_KEY"] = "NA"
 
 
+# ---------------------------
+# OPENROUTER SAFE WRAPPER
+# ---------------------------
+def create_openrouter_llm(model, api_key):
+    try:
+        return LLM(
+            model=model,
+            api_key=api_key,
+            base_url="https://openrouter.ai/api/v1",
+            temperature=0.2,
+            timeout=120,
+            max_tokens=1000
+        )
+    except Exception as e:
+        print(f"OpenRouter failed: {e}")
+        print("Fallback → GPT-4o-mini")
+
+        return LLM(
+            model="openai/gpt-4o-mini",
+            api_key=api_key,
+            base_url="https://openrouter.ai/api/v1",
+            temperature=0.2,
+            timeout=120,
+            max_tokens=1000
+        )
+
+
 def get_llm(choice=None):
-    """
-    Returns an LLM instance based on user choice.
-    Used by BOTH manual and auto paths.
-    """
 
     # --- GROQ ---
     if choice == "1":
-        print("Using GROQ (Llama 3.3 70B)...")
-        api_key = os.getenv("GROQ_API_KEY")
-        if not api_key:
-            api_key = input("Enter Groq API Key (gsk_...): ")
-            os.environ["GROQ_API_KEY"] = api_key
+        print("Using GROQ Llama 3.3 70B...")
+        api_key = os.getenv("GROQ_API_KEY") or input("Groq API Key: ")
+        os.environ["GROQ_API_KEY"] = api_key
 
         return LLM(
             model="groq/llama-3.3-70b-versatile",
@@ -36,57 +61,28 @@ def get_llm(choice=None):
             timeout=120
         )
 
-    # --- GROQ: LLAMA 4 SCOUT (higher limits) ---
-    elif choice == "5":
-        print("Using GROQ (Llama 4 Scout 17B — 500K TPD, 30K TPM)...")
-        api_key = os.getenv("GROQ_API_KEY")
-        if not api_key:
-            api_key = input("Enter Groq API Key (gsk_...): ")
-            os.environ["GROQ_API_KEY"] = api_key
-
-        return LLM(
-            model="groq/meta-llama/llama-4-scout-17b-16e-instruct",
-            api_key=api_key,
-            temperature=0.2,
-            timeout=120
-        )
-
-    # --- GROQ: LLAMA 3.1 8B INSTANT (max RPD, fast) ---
-    elif choice == "6":
-        print("Using GROQ (Llama 3.1 8B Instant — 500K TPD, 14.4K RPD)...")
-        api_key = os.getenv("GROQ_API_KEY")
-        if not api_key:
-            api_key = input("Enter Groq API Key (gsk_...): ")
-            os.environ["GROQ_API_KEY"] = api_key
-
-        return LLM(
-            model="groq/llama-3.1-8b-instant",
-            api_key=api_key,
-            temperature=0.2,
-            timeout=120
-        )
-
-    # --- GOOGLE GEMINI ---
+    # --- GEMINI (DIRECT - FIXED) ---
     elif choice == "2":
-        print("Using GOOGLE GEMINI 2.0 Flash...")
+        print("Using Google Gemini...")
+
         api_key = os.getenv("GOOGLE_API_KEY")
         if not api_key:
-            api_key = input("Enter Gemini API Key: ")
+            api_key = input("Enter Gemini API Key: ").strip()
             os.environ["GOOGLE_API_KEY"] = api_key
 
         return LLM(
-            model="gemini/gemini-2.0-flash",
+            model="gemini/gemini-3-flash-preview",
             api_key=api_key,
             temperature=0.2,
             timeout=120
         )
 
-    # --- OLLAMA (LOCAL) ---
+    # --- OLLAMA ---
     elif choice == "3":
         ollama_base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
         ollama_model_name = os.getenv("OLLAMA_MODEL_NAME", "llama3.1:8b")
 
-        print(f"Using OLLAMA ({ollama_model_name} @ {ollama_base_url})...")
+        print(f"Using OLLAMA {ollama_model_name}")
 
         return LLM(
             model=f"ollama/{ollama_model_name}",
@@ -96,36 +92,96 @@ def get_llm(choice=None):
             timeout=300
         )
 
-    # --- MOCK LLM (TESTING) ---
+    # --- MOCK ---
     elif choice == "4":
-        print("Using MOCK LLM (Testing Mode)...")
-        responses = [
-            "Data Extraction: Loaded data successfully.",
-            "Model Training: Accuracy 0.95.",
-            "MRM: Approved."
-        ]
-        return FakeListChatModel(responses=responses)
+        print("Using MOCK LLM")
 
-    else:
-        print("ERROR: Invalid choice. Using MOCK LLM as fallback.")
-        responses = ["Fallback: Mock Output"]
-        return FakeListChatModel(responses=responses)
+        fake_llm = FakeListChatModel(responses=[
+            "Data loaded",
+            "Training complete",
+            "Approved"
+        ])
+
+        class MockLLM:
+            def __init__(self, fake_llm):
+                self.fake_llm = fake_llm
+                self.model = "mock"
+
+            def invoke(self, messages):
+                prompt = "\n".join([m.content for m in messages if hasattr(m, "content")])
+                return self.fake_llm.invoke(prompt)
+
+        return MockLLM(fake_llm)
+
+    # --- GROQ SCOUT ---
+    elif choice == "5":
+        print("Using GROQ Llama 4 Scout...")
+
+        api_key = os.getenv("GROQ_API_KEY") or input("Groq API Key: ")
+        os.environ["GROQ_API_KEY"] = api_key
+
+        return LLM(
+            model="groq/meta-llama/llama-4-scout-17b-16e-instruct",
+            api_key=api_key,
+            temperature=0.2,
+            timeout=120
+        )
+
+    # --- GROQ FAST ---
+    elif choice == "6":
+        print("Using GROQ 3.1 8B Instant...")
+
+        api_key = os.getenv("GROQ_API_KEY") or input("Groq API Key: ")
+        os.environ["GROQ_API_KEY"] = api_key
+
+        return LLM(
+            model="groq/llama-3.1-8b-instant",
+            api_key=api_key,
+            temperature=0.2,
+            timeout=120
+        )
+
+    # --- OPENROUTER ---
+    elif choice == "7":
+        print("\nSelect OpenRouter Model:")
+        print("1. Qwen 2.5 72B (Reasoning)")
+        print("2. GPT-4o-mini (Stable ⭐)")
+        print("3. Gemini 2.0 Flash (Fast ⚡)")
+    
+        sub_choice = input("Enter choice (1-3): ").strip()
+    
+        api_key = os.getenv("OPENROUTER_API_KEY")
+        if not api_key:
+            api_key = input("Enter OpenRouter API Key: ").strip()
+            os.environ["OPENROUTER_API_KEY"] = api_key
+    
+        if sub_choice == "1":
+            model = "qwen/qwen-2.5-72b-instruct"
+    
+        elif sub_choice == "2":
+            model = "openai/gpt-4o-mini"
+    
+        elif sub_choice == "3":
+            model = "google/gemini-2.0-flash"
+    
+        else:
+            print("Invalid choice → default GPT-4o-mini")
+            model = "openai/gpt-4o-mini"
+    
+        return create_openrouter_llm(model, api_key)
 
 
 def select_llm_interactive():
-    """Interactive LLM selection menu. Returns (llm, choice_str)."""
-    print("\nSelect LLM Provider:")
-    print("1. Groq — Llama 3.3 70B        (100K TPD,  12K TPM  — high quality)")
-    print("2. Google Gemini 2.0 Flash      (very high limits)")
-    print("3. Ollama (Local LLM)")
-    print("4. Mock LLM (Testing)")
-    print("5. Groq — Llama 4 Scout 17B    (500K TPD,  30K TPM  — RECOMMENDED)")
-    print("6. Groq — Llama 3.1 8B Instant (500K TPD, 14.4K RPD — fastest)")
-    choice = input("Choice (1-6): ").strip()
+    print("\nSelect Provider:")
+    print("1. Groq 70B")
+    print("2. Gemini ⭐")
+    print("3. Ollama")
+    print("4. Mock")
+    print("5. Groq Scout")
+    print("6. Groq 8B Fast")
+    print("7. OpenRouter")
 
-    if choice not in ["1", "2", "3", "4", "5", "6"]:
-        print("Invalid choice. Exiting.")
-        return None, None
+    choice = input("Choice (1-7): ").strip()
 
     llm = get_llm(choice)
     return llm, choice

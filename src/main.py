@@ -44,11 +44,12 @@ DATASETS = {
 # LLM choice names for logging
 LLM_NAMES = {
     "1": "groq_llama3.3_70b",
-    "2": "gemini",
+    "2": "gemini-3-flash-preview",
     "3": "ollama",
     "4": "mock",
     "5": "groq_llama4_scout",
     "6": "groq_llama3.1_8b",
+    "7": "open router",
 }
 
 
